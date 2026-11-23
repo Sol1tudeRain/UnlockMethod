@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.3 diagnostic test)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.4 direct-click test)
 
 LSPosed module for SystemUI: when the user taps a notification on AOD/pulsing display or the regular lock screen, request the ROM's genuine UDFPS alternate bouncer when possible. The notification's real pending action remains owned by SystemUI.
 
@@ -56,3 +56,11 @@ Test by waking the device from a notification pulse in AOD, **tapping the notifi
 - `ALT_SHOWN`: the system fingerprint UI is visible and the pattern route was suppressed
 
 If no `CLICK` line appears, that SystemUI version may use a different click handler. **Still experimental; successful compilation is not a functional test.**
+
+## v0.4 direct notification click capture
+
+On the tested ROM, LSPosed logged `AOD_CLICK_HINT before wake` but neither the notification's `onNotificationClicked` callback nor the bouncer hooks. We now record notification clicks **in the already-confirmed `NotificationClicker.onClick` hook, before waking AOD**, provided the clicked view is a real `ExpandableNotificationRow`. We also hook `StatusBarKeyguardViewManager.showBouncer` (the caller of the primary/interactor path), preserving the notification's existing pending dismiss action. More trace logs are emitted for actual scene transitions.
+
+This is **not a fingerprint bypass**: it calls the ROM's own alternate fingerprint UI only when `canShowAlternateBouncerForFingerprint()` returns true. If the alternative UI does not become visible, the normal pattern remains.
+
+Use `su -c 'grep -ih "NotifFingerprint" /data/adb/lspd/log/modules_*.log | tail -n 80'` to check `CLICK_ENTRY`, `PRIMARY`, `ALT_*`, and `SCENE_REQUEST` markers. If `CLICK_ENTRY` exists without `PRIMARY` or `SCENE_REQUEST`, the ROM uses a separate credential entrypoint.

@@ -63,28 +63,36 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         // New and old notification clickers both wake the display before
         // dispatching the action. We deliberately do not intercept their
         // wakeUpIfDozing calls, nor trigger a second notification click.
+        final Class<?> rowType = XposedHelpers.findClassIfExists(
+            "com.android.systemui.statusbar.notification.row.ExpandableNotificationRow", cl);
         Class<?> clicker = XposedHelpers.findClassIfExists(
             "com.android.systemui.statusbar.notification.NotificationClicker", cl);
         if (clicker != null) {
             try {
                 XposedBridge.hookAllMethods(clicker, "onClick", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        // Capture AOD before NotificationClicker wakes the display.
-                        // The manager may not yet be cached on the first tap.
-                        if (p.args != null && p.args.length > 0 &&
-                                p.args[0] instanceof View) {
-                            View view = (View) p.args[0];
-                            Object service = view.getContext().getSystemService(
-                                Context.POWER_SERVICE);
-                            if (service instanceof PowerManager &&
-                                    !((PowerManager) service).isInteractive()) {
-                                LAST_AOD_CLICK_HINT.set(now());
-                                log("AOD_CLICK_HINT before wake");
-                            }
+                        if (p.args == null || p.args.length == 0 ||
+                            !(p.args[0] instanceof View)) return;
+                        View view = (View)p.args[0];
+                        if (rowType == null || !rowType.isInstance(view)) return;
+                        Object service = view.getContext().getSystemService(Context.POWER_SERVICE);
+                        boolean wasInteractive = !(service instanceof PowerManager)
+                            || ((PowerManager) service).isInteractive();
+                        Object starter = field(p.thisObject, "mNotificationActivityStarter");
+                        if (!wasInteractive) {
+                            LAST_AOD_CLICK_HINT.set(now());
+                            log("AOD_CLICK_HINT before wake");
                         }
+                        // IMPORTANT: onNotificationClicked is not invoked on the
+                        // user's ROM. Record the actual notification row tap here
+                        // BEFORE NotificationClicker wakes the AOD display.
+                        recordTap(!wasInteractive);
+                        log("CLICK_ENTRY NotificationClicker.onClick interactive=" +
+                            wasInteractive + " starter=" +
+                            (starter == null ? "missing" : starter.getClass().getName()));
                     }
                 });
-                log("installed AOD click observer");
+                log("HOOK_OK NotificationClicker.onClick (direct tap tracking)");
             } catch (Throwable t) { log("AOD click observer unavailable: " + t); }
         }
 
@@ -127,6 +135,26 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                     }
                 });
             } catch (Throwable t) { log("doze observer unavailable: " + t); }
+            // SceneContainer and legacy ROMs both call showBouncer when an
+            // authenticated notification is pending. The original dismiss
+            // action is already registered; keep it intact.
+            try {
+                XposedBridge.hookAllMethods(manager, "showBouncer", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        keyguardViewManager = p.thisObject;
+                        if (!activeTap() || isRedirecting()) return;
+                        log("PRIMARY showBouncer; return=" + returnType(p) +
+                            " " + alternateStatus(p.thisObject));
+                        if (returnsVoid(p) && showSystemAlternateBouncer(p.thisObject)) {
+                            LAST_NOTIFICATION_TAP.set(0L);
+                            tapWasAod = false;
+                            p.setResult(null);
+                            log("REDIRECT showBouncer -> fingerprint UI");
+                        }
+                    }
+                });
+                log("HOOK_OK StatusBarKeyguardViewManager.showBouncer");
+            } catch (Throwable t) { log("showBouncer hook unavailable: " + brief(t)); }
             try {
                 XposedBridge.hookAllMethods(manager, "showPrimaryBouncer",
                     new XC_MethodHook() {
@@ -192,7 +220,12 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             if (!activeTap() || isRedirecting() ||
                                 p.args == null || p.args.length < 2) return;
                             String target = String.valueOf(p.args[0]);
-                            // Intercept only the actual credential-bouncer scene.
+                            // Trace scene changes before filtering. The user's
+                            // SceneContainer may choose a different target string.
+                            log("SCENE_REQUEST " + route + " target=" + target +
+                                " reason=" + String.valueOf(p.args[1]) +
+                                " return=" + returnType(p));
+                            // Only the known Bouncer target may be redirected.
                             if (!(target.equals("Bouncer") || target.endsWith(".Bouncer") ||
                                   target.endsWith("$Bouncer") || target.endsWith("(Bouncer)")))
                                 return;
@@ -215,7 +248,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.3 AOD diagnostic hooks ready");
+        log("v0.4 AOD direct-click hook ready");
     }
 
     private static void recordTap(boolean aod) {
