@@ -12,14 +12,14 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Safety-first AOD/lockscreen notification diagnostic module.
+ * AOD notification fingerprint priority module.
  *
- * v0.4.1 disables ALL credential-route interception to avoid breaking a
- * pending notification launch after keyguard authentication. It only observes
- * notification clicks and bouncer transitions; it never sets hook results,
- * invokes alternate bouncers, sends PendingIntents, or bypasses auth.
+ * v0.5 preserves SystemUI's dismissWithAction/showBouncer entrypoints (which
+ * register the post-auth notification launch). It only redirects the final
+ * credential bouncer/scene when the ROM confirms that the real UDFPS alternate
+ * bouncer is currently permitted and becomes visible.
  *
- * Fingerprint preference will need separate ROM-specific validation.
+ * Authentication, biometric lockouts and strong-auth policy remain intact.
  */
 public final class NotificationFingerprintHook implements IXposedHookLoadPackage {
     private static final long NORMAL_WINDOW_MS = 3500L;
@@ -158,7 +158,12 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             keyguardViewManager = p.thisObject;
                             if (!activeTap()) return;
                             log("PRIMARY showPrimaryBouncer requested; " + alternateStatus(p.thisObject));
-                            log("SAFE_PASS showPrimaryBouncer (original action preserved)");
+                            if (showSystemAlternateBouncer(p.thisObject)) {
+                                LAST_NOTIFICATION_TAP.set(0L);
+                                tapWasAod = false;
+                                p.setResult(null);
+                                log("FP_PRIORITY manager.showPrimaryBouncer -> UDFPS");
+                            }
                         }
                     });
                 log("installed primary-bouncer redirect");
@@ -188,9 +193,15 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                         log("PRIMARY interactor.show requested; return=" + 
                             (ret == null ? "unknown" : ret.getName()) +
                             " " + alternateStatus(mgr));
-                        // Let the primary bouncer record its dismiss action.
-                        // No forced alternative UI or altered return values.
-                        log("SAFE_PASS PrimaryBouncerInteractor.show");
+                        // This is the last-resort primary bouncer entrypoint.
+                        // Dismissal actions are already registered by SystemUI.
+                        if ((ret == Void.TYPE || ret == Boolean.TYPE) &&
+                                showSystemAlternateBouncer(mgr)) {
+                            LAST_NOTIFICATION_TAP.set(0L);
+                            tapWasAod = false;
+                            p.setResult(ret == Boolean.TYPE ? Boolean.TRUE : null);
+                            log("FP_PRIORITY PrimaryBouncerInteractor.show -> UDFPS");
+                        }
                     }
                 });
                 log("installed primary-interactor redirect");
@@ -220,8 +231,16 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             log("SCENE " + route + " -> Bouncer; reason=" +
                                 String.valueOf(p.args[1]) + " manager=" + (mgr != null) +
                                 " " + alternateStatus(mgr));
-                            log("SAFE_PASS SceneInteractor." + route +
-                                " (original transition preserved)");
+                            // When SceneContainer bypasses the legacy bouncer, redirect
+                            // only a notification-linked Bouncer scene transition.
+                            // We do NOT intercept the outer dismissWithAction() or
+                            // showBouncer() methods that own the notification action.
+                            if (returnsVoid(p) && mgr != null && showSystemAlternateBouncer(mgr)) {
+                                LAST_NOTIFICATION_TAP.set(0L);
+                                tapWasAod = false;
+                                p.setResult(null);
+                                log("FP_PRIORITY SceneInteractor." + route + " -> UDFPS");
+                            }
                         }
                     });
                     log("HOOK_OK SceneInteractor." + route);
@@ -230,7 +249,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.4.1 SAFE MODE: all credential methods observation-only; notification launch untouched");
+        log("v0.5 FINGERPRINT PRIORITY: late bouncer redirect; dismissWithAction untouched");
     }
 
     private static void recordTap(boolean aod) {
@@ -249,6 +268,65 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         if (age >= 0L && age <= (tapWasAod ? AOD_WINDOW_MS : NORMAL_WINDOW_MS)) return true;
         LAST_NOTIFICATION_TAP.compareAndSet(t, 0L);
         tapWasAod = false;
+        return false;
+    }
+
+    /**
+     * Request the platform UDFPS bouncer. Never fake eligibility or a successful
+     * biometric. Do not alter KeyguardDismissActionInteractor, post-auth actions,
+     * PendingIntent or launch options: SystemUI retains all of them.
+     */
+    private static boolean showSystemAlternateBouncer(Object mgr) {
+        if (mgr == null || !showing(mgr) || isDozing(mgr)) {
+            log("FP_SKIP keyguard missing or still dozing");
+            return false;
+        }
+        Object state = field(mgr, "mKeyguardStateController");
+        if (Boolean.TRUE.equals(optBool(state, "isOccluded"))) {
+            log("FP_SKIP occluded");
+            return false;
+        }
+        Object alternate = field(mgr, "mAlternateBouncerInteractor");
+        if (alternate == null) {
+            log("FP_SKIP missing alternate interactor");
+            return false;
+        }
+        Boolean eligible = optBool(alternate, "canShowAlternateBouncerForFingerprint");
+        if (!Boolean.TRUE.equals(eligible)) {
+            log("FP_SKIP platform eligibility=" + eligible);
+            return false;
+        }
+        try {
+            try {
+                XposedHelpers.callMethod(alternate, "forceShow");
+            } catch (Throwable t) {
+                if (!missingMethod(t)) throw t;
+                Object answer = XposedHelpers.callMethod(alternate, "show");
+                log("FP legacy show result=" + answer);
+            }
+            if (!Boolean.TRUE.equals(optBool(alternate, "isVisibleState"))) {
+                log("FP_SKIP alternate UI not visible after show");
+                return false;
+            }
+            try {
+                XposedHelpers.callMethod(mgr, "updateAlternateBouncerShowing", true);
+            } catch (Throwable t) {
+                // Non-fatal: the repository's visible-state flag is authoritative.
+                log("FP_NOTE UI sync unavailable: " + brief(t));
+            }
+            log("FP_SHOWN fingerprint alternate bouncer visible");
+            return true;
+        } catch (Throwable t) {
+            log("FP_FAIL alternate bouncer: " + brief(t));
+            return false;
+        }
+    }
+
+    private static boolean missingMethod(Throwable t) {
+        while (t != null) {
+            if (t instanceof NoSuchMethodError || t instanceof NoSuchMethodException) return true;
+            t = t.getCause();
+        }
         return false;
     }
 

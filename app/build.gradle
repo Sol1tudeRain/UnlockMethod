@@ -18,8 +18,8 @@ android {
         applicationId 'dev.notifingerprint'
         minSdk 29
         targetSdk 35
-        versionCode 7
-        versionName '0.4.1-safe-navigation'
+        versionCode 8
+        versionName '0.5-fingerprint-priority'
     }
     signingConfigs {
         if (hasStableSigning) {

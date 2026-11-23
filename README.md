@@ -1,6 +1,6 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.4.1 navigation safety hotfix)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.5 fingerprint-first test)
 
-LSPosed module for SystemUI. v0.4.1 is a safety hotfix that observes AOD/lockscreen notification taps and lets the ROM's native authentication and pending notification launch run without interference.
+LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
 **Status:** Experimental; not proven compatible with all PixelOS / Android 17 builds. Requires the ROM's existing AlternateBouncerInteractor to be present. No simulated biometric success, no StrongAuth bypass.
 
@@ -74,3 +74,17 @@ User reports: tapping a notification opens an application page that does not loa
 **Temporary trade-off:** the custom 'prefer fingerprint after AOD notification tap' behavior is disabled. Your ROM may still show the pattern when tapping an AOD notification. This is intentional until a safe, ROM-specific fingerprint switch can be verified.
 
 Test: compare module off vs. v0.4.1 on; tap a notification, complete the system's requested authentication, verify that the target app fully loads. If either result fails, capture both LSPosed module logs and corresponding Android app/activity launch logs. Do not forcibly restart or manually send the notification PendingIntent.
+
+## v0.5 – fingerprint priority; do not skip notification action registration
+
+AOSP `StatusBarKeyguardViewManager.dismissWithAction` stores the notification dismissal action before choosing a bouncer. In v0.4, stopping `showBouncer` itself could interfere with the normal launch sequence. This version keeps that method untouched and only attempts to replace the **last-stage** primary bouncer or Bouncer scene.
+
+The exact PixelOS build may use a different route; this is an experimental prioritization, **not a tested compatibility fix**. Real fingerprint eligibility must be granted by the platform's `canShowAlternateBouncerForFingerprint()`, and `isVisibleState()` must confirm the alternate bouncer. Only then will the primary-bouncer request be skipped.
+
+**Trade-off explicitly chosen:** prioritize fingerprint UI even if the notification-to-app handoff still requires another fix. Never bypass fingerprint lockouts or reboot-first-credential rules.
+
+### Diagnostics
+
+`su -c 'grep -ih "NotifFingerprint" /data/adb/lspd/log/modules_*.log | tail -n 90'`
+
+Look for `FP_SHOWN`, `FP_SKIP`, `FP_PRIORITY`, `PRIMARY`, and `SCENE_REQUEST` lines after tapping an AOD notification.
