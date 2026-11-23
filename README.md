@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.5.1 fingerprint compatibility diagnostic)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.6 AOD fingerprint compatibility)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
@@ -98,3 +98,7 @@ Look for `FP_SHOWN`, `FP_SKIP`, `FP_PRIORITY`, `PRIMARY`, and `SCENE_REQUEST` li
 - Logs `dismissWithAction` both before and after completion to see whether the post-unlock action remains queued.
 
 The existing security checks remain unchanged, and this version does not override fingerprint eligibility if it cannot be verified. No claims that the ROM's UDFPS path is working are warranted until on-device logs confirm it. Inspect LSPosed module logs, not just logcat.
+
+
+## v0.6: AOD notification fingerprint gate fixed using device logs
+Corrected `PrimaryBouncerInteractor.show(String, boolean): boolean` interception: previous hook wrongly expected a Boolean as the first argument and never executed. The ROM has `AlternateBouncerInteractor.forceShow()` and `isVisibleState()` but no `canShowAlternateBouncerForFingerprint()`. This release reads the newer `canShowAlternateBouncer` StateFlow where available; otherwise uses strict KeyguardUpdateMonitor checks (fingerprint enrolled, unlocked biometric allowed, no fingerprint lockout, fingerprint currently listening). A missing or false eligibility check leaves the original pattern UI intact. Does not interrupt `dismissWithAction()`, `launchPendingWakeupAction()` or `showBouncer()`; does not fake auth. Please examine `FP_GATE` and `FP_PRIORITY` logs; ROM compatibility still unverified.

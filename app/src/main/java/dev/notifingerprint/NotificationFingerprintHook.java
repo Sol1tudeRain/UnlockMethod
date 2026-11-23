@@ -198,8 +198,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                                 " manager=" + (mgr != null));
                         }
                         if (mgr == null || !activeTap() ||
-                            p.args == null || p.args.length == 0 ||
-                            !(p.args[0] instanceof Boolean)) return;
+                            p.args == null || p.args.length < 2 ||
+                            !(p.args[0] instanceof String) ||
+                            !(p.args[1] instanceof Boolean)) return;
                         Object declared = field(mgr, "mPrimaryBouncerInteractor");
                         if (declared != null && declared != p.thisObject) return;
                         Class<?> ret = returnType(p);
@@ -264,7 +265,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.5.1 diagnostics: inspect runtime alternate bouncer methods and failures");
+        log("v0.6: corrected PrimaryBouncerInteractor.show(String,boolean) and eligibility gate");
     }
 
     private static void recordTap(boolean aod) {
@@ -306,7 +307,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
             log("FP_SKIP missing alternate interactor");
             return false;
         }
-        Boolean eligible = optBool(alternate, "canShowAlternateBouncerForFingerprint");
+        Boolean eligible = currentAlternateEligibility(alternate, mgr);
         if (!Boolean.TRUE.equals(eligible)) {
             log("FP_SKIP platform eligibility=" + eligible);
             return false;
@@ -345,6 +346,56 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         return false;
     }
 
+    // Prefer the ROM's own StateFlow decision; do not bypass a false result.
+    // Some PixelOS builds remove the old canShowAlternateBouncerForFingerprint method.
+    private static Boolean currentAlternateEligibility(Object alt, Object mgr) {
+        Object flow = field(alt, "canShowAlternateBouncer");
+        if (flow == null) {
+            try { flow = XposedHelpers.callMethod(alt, "getCanShowAlternateBouncer"); }
+            catch (Throwable ignored) {}
+        }
+        if (flow != null) {
+            try {
+                Object v = XposedHelpers.callMethod(flow, "getValue");
+                log("FP_GATE alternateStateFlow=" + v);
+                return v instanceof Boolean ? (Boolean) v : false;
+            } catch (Throwable t) {
+                log("FP_GATE flow error " + brief(t));
+                return false;
+            }
+        }
+
+        // Strict fallback to platform strong-auth, lockout, UDFPS and
+        // fingerprint-listening checks; unknown results always deny forcing.
+        Object monitor = field(mgr, "mKeyguardUpdateManager");
+        if (monitor == null) monitor = field(mgr, "mKeyguardUpdateMonitor");
+        if (monitor == null) { log("FP_GATE monitor missing"); return false; }
+        Boolean allowed = optBool(monitor, "isUnlockingWithFingerprintAllowed");
+        if (allowed == null) {
+            try {
+                Object v = XposedHelpers.callMethod(monitor,
+                    "isUnlockingWithBiometricAllowed", true);
+                if (v instanceof Boolean) allowed = (Boolean) v;
+            } catch (Throwable t) { log("FP_GATE strong-auth method unavailable " + brief(t)); }
+        }
+        Boolean locked = optBool(monitor, "isFingerprintLockedOut");
+        if (locked == null) {
+            Object temp = field(monitor, "mFingerprintLockedOut");
+            Object perm = field(monitor, "mFingerprintLockedOutPermanent");
+            if (temp instanceof Boolean && perm instanceof Boolean)
+                locked = (Boolean) temp || (Boolean) perm;
+        }
+        Boolean enrolled = optBool(monitor, "isUdfpsEnrolled");
+        Boolean listening = optBool(monitor, "isFingerprintDetectionRunning");
+        boolean ok = Boolean.TRUE.equals(allowed)
+            && Boolean.FALSE.equals(locked)
+            && Boolean.TRUE.equals(enrolled)
+            && Boolean.TRUE.equals(listening);
+        log("FP_GATE monitor allowed=" + allowed + " locked=" + locked +
+            " enrolled=" + enrolled + " detection=" + listening + " decision=" + ok);
+        return ok;
+    }
+
     private static String alternateStatus(Object mgr) {
         if (mgr == null) return "alt=(no manager)";
         Object alternate = field(mgr, "mAlternateBouncerInteractor");
@@ -369,7 +420,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
             }
         }
         return "dozing=" + isDozing(mgr) +
-            " eligible=" + optBool(alternate, "canShowAlternateBouncerForFingerprint") +
+            " flowPresent=" + (field(alternate, "canShowAlternateBouncer") != null) +
             " visible=" + optBool(alternate, "isVisibleState");
     }
     private static String brief(Throwable t) {
