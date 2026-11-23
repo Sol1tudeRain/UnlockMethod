@@ -1,0 +1,11 @@
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+# NEVER commit private signing keys or their passwords.
+*.jks
+*.keystore
+signing.properties
