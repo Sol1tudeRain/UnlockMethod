@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:allowBackup="false" android:hasCode="true"
+                 android:label="锁屏通知优先指纹">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription"
+                   android:value="点击锁屏通知后尝试优先指纹解锁（实验版）" />
+        <meta-data android:name="xposedminversion" android:value="82" />
+    </application>
+</manifest>
