@@ -32,7 +32,8 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
     private static volatile boolean tapWasAod;
     private static volatile Object keyguardViewManager;
     private static volatile boolean altMethodsDumped;
-    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    // Avoid accessing the Android main Looper during Xposed class initialization.
+    // LSPosed may load this class before ActivityThread has installed it.
     private static final java.util.concurrent.atomic.AtomicLong DEFER_SEQ =
         new java.util.concurrent.atomic.AtomicLong(0L);
     private static volatile DeferredBouncer pendingBouncer;
@@ -276,6 +277,22 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             log("AOD_GRACE duplicate primary request deferred");
                             return;
                         }
+                        // Create Handler only on the real notification-click path.
+                        // When SystemUI does not yet have a main Looper, leave
+                        // the original credential bouncer unmodified.
+                        Handler mainHandler;
+                        try {
+                            Looper mainLooper = Looper.getMainLooper();
+                            if (mainLooper == null) {
+                                log("AOD_GRACE no main looper; original pattern unchanged");
+                                return;
+                            }
+                            mainHandler = new Handler(mainLooper);
+                        } catch (Throwable t) {
+                            log("AOD_GRACE handler unavailable; original pattern unchanged: " +
+                                brief(t));
+                            return;
+                        }
                         DeferredBouncer work = new DeferredBouncer(
                             DEFER_SEQ.incrementAndGet(),
                             LAST_NOTIFICATION_TAP.get(),
@@ -285,9 +302,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                         log("AOD_GRACE start token=" + work.id +
                             " window=" + GRACE_FALLBACK_MS + "ms");
                         for (long delay : GRACE_CHECKS_MS) {
-                            MAIN.postDelayed(() -> checkDeferredBouncer(work, false), delay);
+                            mainHandler.postDelayed(() -> checkDeferredBouncer(work, false), delay);
                         }
-                        MAIN.postDelayed(() -> checkDeferredBouncer(work, true),
+                        mainHandler.postDelayed(() -> checkDeferredBouncer(work, true),
                             GRACE_FALLBACK_MS);
                     }
                 });
@@ -338,7 +355,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.7 AOD grace: preserve notification, retry true UDFPS gate, bounded pattern fallback");
+        log("v0.7.1: fix LSPosed eager Handler initializer; preserve AOD UDFPS grace");
     }
 
     private static void checkDeferredBouncer(DeferredBouncer work, boolean finalCheck) {

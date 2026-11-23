@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.7 AOD fingerprint grace period)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.7.1 AOD fingerprint grace period)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
@@ -123,3 +123,6 @@ Tested on previously captured logs, not yet on a real device. When AOD notificat
 
 The grace period applies only to notification clicks initially detected on AOD; normal lockscreen and other unlock flows are unchanged. A keyguard `hide` callback cancels the delayed fallback so it cannot pop up after a successful unlock. Logs begin with `AOD_GRACE start`, show `AOD_GRACE waiting` / `FP_GATE`, and finish with either `AOD_GRACE fingerprint shown` or `AOD_GRACE fallback original pattern`. 
 **This is experimental**: deferring the credential method could still cause ROM-specific notification launch timing issues. Disable the LSPosed module and restart SystemUI if notification navigation is affected.
+
+## v0.7.1 startup fix
+LSPosed was throwing `ExceptionInInitializerError` at `NotificationFingerprintHook.java:35` because a static `Handler(Looper.getMainLooper())` was created before SystemUI's main looper was ready. The handler is now constructed lazily on AOD notification events, with a fail-open-to-original-primary-bouncer fallback if the main looper cannot be obtained. No static Android Handler initializer remains.
