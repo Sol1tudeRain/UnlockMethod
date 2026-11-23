@@ -265,7 +265,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.6: corrected PrimaryBouncerInteractor.show(String,boolean) and eligibility gate");
+        log("v0.6.1: bypass stale manager.isShowing veto; rely on ROM biometric state flow");
     }
 
     private static void recordTap(boolean aod) {
@@ -293,11 +293,27 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
      * PendingIntent or launch options: SystemUI retains all of them.
      */
     private static boolean showSystemAlternateBouncer(Object mgr) {
-        if (mgr == null || !showing(mgr) || isDozing(mgr)) {
-            log("FP_SKIP keyguard missing or still dozing");
+        if (mgr == null) {
+            log("FP_SKIP no keyguard manager");
             return false;
         }
         Object state = field(mgr, "mKeyguardStateController");
+        Boolean showing = optBool(state, "isShowing");
+        Boolean unlocked = optBool(state, "isUnlocked");
+        boolean dozing = isDozing(mgr);
+        log("FP_STATE keyguardShowing=" + showing + " unlocked=" + unlocked +
+            " dozing=" + dozing + " controllerPresent=" + (state != null));
+        // SceneContainer may already report 'isShowing=false' as the alternate
+        // keyguard scene is assembled. Do not use that stale flag as a veto.
+        // The ROM's own canShowAlternateBouncer gate (below) is authoritative.
+        if (dozing) {
+            log("FP_SKIP still dozing");
+            return false;
+        }
+        if (Boolean.TRUE.equals(unlocked)) {
+            log("FP_SKIP already unlocked");
+            return false;
+        }
         if (Boolean.TRUE.equals(optBool(state, "isOccluded"))) {
             log("FP_SKIP occluded");
             return false;
@@ -308,6 +324,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
             return false;
         }
         Boolean eligible = currentAlternateEligibility(alternate, mgr);
+        log("FP_GATE_RESULT=" + eligible);
         if (!Boolean.TRUE.equals(eligible)) {
             log("FP_SKIP platform eligibility=" + eligible);
             return false;

@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.6 AOD fingerprint compatibility)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.6.1 AOD fingerprint state compatibility)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
@@ -102,3 +102,11 @@ The existing security checks remain unchanged, and this version does not overrid
 
 ## v0.6: AOD notification fingerprint gate fixed using device logs
 Corrected `PrimaryBouncerInteractor.show(String, boolean): boolean` interception: previous hook wrongly expected a Boolean as the first argument and never executed. The ROM has `AlternateBouncerInteractor.forceShow()` and `isVisibleState()` but no `canShowAlternateBouncerForFingerprint()`. This release reads the newer `canShowAlternateBouncer` StateFlow where available; otherwise uses strict KeyguardUpdateMonitor checks (fingerprint enrolled, unlocked biometric allowed, no fingerprint lockout, fingerprint currently listening). A missing or false eligibility check leaves the original pattern UI intact. Does not interrupt `dismissWithAction()`, `launchPendingWakeupAction()` or `showBouncer()`; does not fake auth. Please examine `FP_GATE` and `FP_PRIORITY` logs; ROM compatibility still unverified.
+
+
+## v0.6.1: AOD state confirmation from actual device
+The user's v0.6 logs show the notification is clicked on AOD, `mDozing=false` before `PrimaryBouncerInteractor.show(String,boolean)` executes, but the hook returns `FP_SKIP keyguard missing or still dozing`. As a result, the remaining culprit is a stale `mKeyguardStateController.isShowing()` value or a missing controller. On SceneContainer builds this value may not accurately indicate the transition state.
+
+v0.6.1 no longer uses `isShowing()` as an unconditional veto. Instead it checks the ROM's own `canShowAlternateBouncer` StateFlow, and requires it to be **explicitly true**. It also vetoes requests during doze, for an already-unlocked keyguard, and for occlusion; unknown/false biometric permissions remain fail-closed. The original notification dismissal actions are not forged or replayed.
+
+New diagnostic lines: `FP_STATE` (showing, unlocked, dozing) and `FP_GATE_RESULT` (actual permission status). If the gate is false, UDFPS will not be forced; look for its reason before proceeding.
