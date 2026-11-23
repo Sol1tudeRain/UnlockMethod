@@ -18,8 +18,8 @@ android {
         applicationId 'dev.notifingerprint'
         minSdk 29
         targetSdk 35
-        versionCode 12
-        versionName '0.6.2-gate-diagnostics'
+        versionCode 13
+        versionName '0.7-aod-fingerprint-grace'
     }
     signingConfigs {
         if (hasStableSigning) {

@@ -1,6 +1,8 @@
 package dev.notifingerprint;
 
 import java.lang.reflect.Method;
+import android.os.Handler;
+import android.os.Looper;
 import android.content.Context;
 import android.os.PowerManager;
 import android.view.View;
@@ -14,10 +16,11 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /**
  * AOD notification fingerprint priority module.
  *
- * v0.5 preserves SystemUI's dismissWithAction/showBouncer entrypoints (which
- * register the post-auth notification launch). It only redirects the final
- * credential bouncer/scene when the ROM confirms that the real UDFPS alternate
- * bouncer is currently permitted and becomes visible.
+ * v0.7 preserves SystemUI's original dismissWithAction and showBouncer.
+ * During an AOD notification click, it defers ONLY the final primary-bouncer
+ * invocation briefly while the AOD->lockscreen transition completes. It
+ * retries the actual system UDFPS eligibility flow, and uses the original
+ * credential bouncer as a bounded fallback. No fake fingerprint success.
  *
  * Authentication, biometric lockouts and strong-auth policy remain intact.
  */
@@ -29,6 +32,31 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
     private static volatile boolean tapWasAod;
     private static volatile Object keyguardViewManager;
     private static volatile boolean altMethodsDumped;
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static final java.util.concurrent.atomic.AtomicLong DEFER_SEQ =
+        new java.util.concurrent.atomic.AtomicLong(0L);
+    private static volatile DeferredBouncer pendingBouncer;
+    private static final long[] GRACE_CHECKS_MS = {100L, 240L, 420L, 650L, 950L, 1250L};
+    private static final long GRACE_FALLBACK_MS = 1450L;
+
+    private static final class DeferredBouncer {
+        final long id;
+        final long tapTime;
+        final Method original;
+        final Object target;
+        final Object[] arguments;
+        final Object manager;
+        boolean completed;
+        DeferredBouncer(long id, long tapTime, Method original, Object target,
+                         Object[] arguments, Object manager) {
+            this.id = id;
+            this.tapTime = tapTime;
+            this.original = original;
+            this.target = target;
+            this.arguments = arguments;
+            this.manager = manager;
+        }
+    }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
@@ -137,6 +165,20 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                     });
             } catch (Throwable t) { log("wakeup observer unavailable: " + t); }
 
+            // Clear deferred work when SystemUI has actually dismissed the
+            // keyguard; never show a delayed pattern over an unlocked app.
+            try {
+                XposedBridge.hookAllMethods(manager, "hide", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        DeferredBouncer work = pendingBouncer;
+                        if (work != null && !work.completed) {
+                            work.completed = true;
+                            pendingBouncer = null;
+                            log("AOD_GRACE canceled: keyguard hide");
+                        }
+                    }
+                });
+            } catch (Throwable t) { log("hide observer unavailable: " + brief(t)); }
             try {
                 XposedBridge.hookAllMethods(manager, "onDozingChanged", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
@@ -173,12 +215,10 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             keyguardViewManager = p.thisObject;
                             if (!activeTap()) return;
                             log("PRIMARY showPrimaryBouncer requested; " + alternateStatus(p.thisObject));
-                            if (showSystemAlternateBouncer(p.thisObject)) {
-                                LAST_NOTIFICATION_TAP.set(0L);
-                                tapWasAod = false;
-                                p.setResult(null);
-                                log("FP_PRIORITY manager.showPrimaryBouncer -> UDFPS");
-                            }
+                            // The confirmed AOD route calls PrimaryBouncerInteractor.show.
+                            // Do not truncate this higher-level navigation method. Its
+                            // original implementation retains notification dismissal work.
+                            log("AOD_GRACE outer showPrimaryBouncer unchanged");
                         }
                     });
                 log("installed primary-bouncer redirect");
@@ -216,13 +256,39 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             " " + alternateStatus(mgr));
                         // This is the last-resort primary bouncer entrypoint.
                         // Dismissal actions are already registered by SystemUI.
-                        if ((ret == Void.TYPE || ret == Boolean.TYPE) &&
-                                showSystemAlternateBouncer(mgr)) {
+                        if (ret != Boolean.TYPE && ret != Void.TYPE) return;
+                        // The real ROM entry is show(String,boolean):boolean.
+                        // First try the fully authorised system alternate bouncer.
+                        if (showSystemAlternateBouncer(mgr)) {
                             LAST_NOTIFICATION_TAP.set(0L);
                             tapWasAod = false;
                             p.setResult(ret == Boolean.TYPE ? Boolean.TRUE : null);
                             log("FP_PRIORITY PrimaryBouncerInteractor.show -> UDFPS");
+                            return;
                         }
+                        // Only defer AOD notification-linked requests. On ordinary
+                        // lockscreen, leave the credential UI untouched.
+                        if (!tapWasAod || ret != Boolean.TYPE) return;
+                        DeferredBouncer old = pendingBouncer;
+                        if (old != null && !old.completed &&
+                            old.tapTime == LAST_NOTIFICATION_TAP.get()) {
+                            p.setResult(Boolean.FALSE);
+                            log("AOD_GRACE duplicate primary request deferred");
+                            return;
+                        }
+                        DeferredBouncer work = new DeferredBouncer(
+                            DEFER_SEQ.incrementAndGet(),
+                            LAST_NOTIFICATION_TAP.get(),
+                            (Method) p.method, p.thisObject, p.args.clone(), mgr);
+                        pendingBouncer = work;
+                        p.setResult(Boolean.FALSE); // Bouncer not yet displayed.
+                        log("AOD_GRACE start token=" + work.id +
+                            " window=" + GRACE_FALLBACK_MS + "ms");
+                        for (long delay : GRACE_CHECKS_MS) {
+                            MAIN.postDelayed(() -> checkDeferredBouncer(work, false), delay);
+                        }
+                        MAIN.postDelayed(() -> checkDeferredBouncer(work, true),
+                            GRACE_FALLBACK_MS);
                     }
                 });
                 log("installed primary-interactor redirect");
@@ -272,7 +338,62 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.6.2: read-only AOD UDFPS gate diagnostics before, during, after wakeup");
+        log("v0.7 AOD grace: preserve notification, retry true UDFPS gate, bounded pattern fallback");
+    }
+
+    private static void checkDeferredBouncer(DeferredBouncer work, boolean finalCheck) {
+        if (work.completed || pendingBouncer != work ||
+            DEFER_SEQ.get() != work.id) return;
+        if (LAST_NOTIFICATION_TAP.get() != work.tapTime || !activeTap()) {
+            work.completed = true;
+            pendingBouncer = null;
+            log("AOD_GRACE canceled: tap expired or replaced");
+            return;
+        }
+        if (!isDozing(work.manager) && showSystemAlternateBouncer(work.manager)) {
+            work.completed = true;
+            pendingBouncer = null;
+            LAST_NOTIFICATION_TAP.set(0L);
+            tapWasAod = false;
+            log("AOD_GRACE fingerprint shown after wake; token=" + work.id);
+            return;
+        }
+        if (!finalCheck) {
+            log("AOD_GRACE waiting; token=" + work.id +
+                " age=" + (now() - work.tapTime) + "ms");
+            return;
+        }
+
+        work.completed = true;
+        pendingBouncer = null;
+        // A successful fingerprint unlock calls manager.hide(), above. A
+        // dismissible keyguard is another reason not to show late credentials.
+        Object alt = field(work.manager, "mAlternateBouncerInteractor");
+        Object ki = lazyGet(field(alt, "keyguardInteractor"));
+        if ("true".equals(readState(ki, "isKeyguardDismissible"))) {
+            log("AOD_GRACE finished: keyguard already dismissible");
+            return;
+        }
+        try {
+            // Invoke original method, bypassing this Hook to avoid recursion.
+            // The saved dismiss action still belongs to SystemUI.
+            Object result = XposedBridge.invokeOriginalMethod(
+                work.original, work.target, work.arguments);
+            log("AOD_GRACE fallback original pattern; result=" + result +
+                " token=" + work.id);
+        } catch (Throwable t) {
+            log("AOD_GRACE FALLBACK_ERROR " + brief(t));
+            try {
+                // Last-chance fail-safe on the original manager, not a synthetic
+                // notification click or authentication event.
+                XposedHelpers.callMethod(work.manager, "showPrimaryBouncer", true);
+                log("AOD_GRACE fallback manager.showPrimaryBouncer");
+            } catch (Throwable secondary) {
+                log("AOD_GRACE manager fallback error " + brief(secondary));
+            }
+        }
+        LAST_NOTIFICATION_TAP.set(0L);
+        tapWasAod = false;
     }
 
     private static void recordTap(boolean aod) {

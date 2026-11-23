@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.6.2 UDFPS gate diagnosis)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.7 AOD fingerprint grace period)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
@@ -116,3 +116,10 @@ New diagnostic lines: `FP_STATE` (showing, unlocked, dozing) and `FP_GATE_RESULT
 New `FP_CAUSES` lines are emitted at three points: after AOD dozing changes, before pending action wake resumes, and before the primary pattern bouncer is shown. They read only `alternateBouncerSupported`, `canShowAlternateBouncer`, `mListenForCanShowAlternateBouncer`, `primaryBouncerShow`, `isFingerprintAuthCurrentlyAllowed`, `isFingerprintLockedOut`, `isKeyguardDismissible`, and the current scene/state when available.
 
 This matters because the newer AOSP `canShowAlternateBouncer` is a `stateIn(WhileSubscribed(), initialValue=false)`. If the SystemUI collector never starts, its value can stay false even if the underlying biometric conditions are otherwise allowed. AOSP `StatusBarKeyguardViewManager.registerListeners` normally subscribes to that flow. **v0.6.2 diagnoses whether the collector or an actual eligibility condition is failing.** It does not alter fingerprint policy or skip authentication. The current v0.6.1 fingerprint-priority behavior is retained unchanged.
+
+
+## v0.7 AOD fingerprint-first grace period
+Tested on previously captured logs, not yet on a real device. When AOD notification click reaches `PrimaryBouncerInteractor.show(String, boolean)` a few milliseconds after `onDozingChanged(false)`, the SystemUI `canShowAlternateBouncer` StateFlow can still be false because AOD / DOZING keyguard transition progress is nonzero. v0.7 postpones **only** this final bouncer method for up to 1450 milliseconds, and polls the ROM's *unmodified* eligibility StateFlow. If it becomes explicitly true, calls original UDFPS `forceShow()` and retains SystemUI's original notification OnDismissAction. If it remains false, invokes the original bouncer method using `XposedBridge.invokeOriginalMethod` as a bounded fallback. The module does not change the biometric permission flag or signal authentication success.
+
+The grace period applies only to notification clicks initially detected on AOD; normal lockscreen and other unlock flows are unchanged. A keyguard `hide` callback cancels the delayed fallback so it cannot pop up after a successful unlock. Logs begin with `AOD_GRACE start`, show `AOD_GRACE waiting` / `FP_GATE`, and finish with either `AOD_GRACE fingerprint shown` or `AOD_GRACE fallback original pattern`. 
+**This is experimental**: deferring the credential method could still cause ROM-specific notification launch timing issues. Disable the LSPosed module and restart SystemUI if notification navigation is affected.
