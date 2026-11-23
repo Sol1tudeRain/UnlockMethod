@@ -1,10 +1,12 @@
-name: Build LSPosed APK
+name: Build stable-signed LSPosed APK
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
 permissions:
   contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,13 +23,46 @@ jobs:
           test -x "$SDKMANAGER"
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null || true
           "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install 'platforms;android-35' 'build-tools;35.0.0'
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-      - name: Build APK
-        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify configured stable-signing secrets
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.UNLOCK_SIGNING_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.UNLOCK_SIGNING_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.UNLOCK_SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.UNLOCK_SIGNING_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_B64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo "::error::Configure all four UNLOCK_SIGNING_* GitHub Actions repository secrets using the PRIVATE signing-setup bundle."
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/UnlockMethod-signing.p12"
+          echo "UNLOCK_SIGNING_KEYSTORE=$RUNNER_TEMP/UnlockMethod-signing.p12" >> "$GITHUB_ENV"
+          echo "UNLOCK_SIGNING_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "UNLOCK_SIGNING_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "UNLOCK_SIGNING_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build fixed-signature APK
+        run: gradle --no-daemon :app:assembleRelease
+
+      - name: Verify stable APK signature
+        shell: bash
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+
+      - name: Remove private key from runner
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/UnlockMethod-signing.p12"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: UnlockMethod-test-APK
-          path: app/build/outputs/apk/debug/*.apk
+          name: UnlockMethod-stable-signed-APK
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error

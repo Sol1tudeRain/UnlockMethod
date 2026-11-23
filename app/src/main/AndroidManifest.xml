@@ -5,5 +5,6 @@
         <meta-data android:name="xposeddescription"
                    android:value="点击锁屏通知后尝试优先指纹解锁（实验版）" />
         <meta-data android:name="xposedminversion" android:value="82" />
+        <meta-data android:name="xposedscope" android:value="com.android.systemui" />
     </application>
 </manifest>

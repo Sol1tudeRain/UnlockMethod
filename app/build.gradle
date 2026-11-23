@@ -1,5 +1,16 @@
 plugins { id 'com.android.application' }
 
+// A stable APK update requires the SAME private signing key every time.
+// The keystore and passwords are injected from GitHub Actions secrets and
+// must never be checked into this PUBLIC repository.
+def signingEnv = [
+    file : System.getenv('UNLOCK_SIGNING_KEYSTORE'),
+    store: System.getenv('UNLOCK_SIGNING_STORE_PASSWORD'),
+    alias: System.getenv('UNLOCK_SIGNING_KEY_ALIAS'),
+    key  : System.getenv('UNLOCK_SIGNING_KEY_PASSWORD'),
+]
+def hasStableSigning = signingEnv.values().every { it != null && !it.isEmpty() }
+
 android {
     namespace 'dev.notifingerprint'
     compileSdk 35
@@ -7,12 +18,26 @@ android {
         applicationId 'dev.notifingerprint'
         minSdk 29
         targetSdk 35
-        versionCode 3
-        versionName '0.2.1-aod-test'
+        versionCode 4
+        versionName '0.2.2-aod-stable-signing'
+    }
+    signingConfigs {
+        if (hasStableSigning) {
+            stable {
+                storeFile file(signingEnv.file)
+                storePassword signingEnv.store
+                keyAlias signingEnv.alias
+                keyPassword signingEnv.key
+                storeType 'pkcs12'
+            }
+        }
     }
     buildTypes {
         debug { }
-        release { minifyEnabled false }
+        release {
+            minifyEnabled false
+            if (hasStableSigning) signingConfig signingConfigs.stable
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -20,6 +45,17 @@ android {
     }
 }
 dependencies {
-    // Compile-only Xposed interfaces; these must not be bundled into the APK.
+    // Compile-only interfaces; NEVER bundle dummy Xposed implementations.
     compileOnly project(':xposed-stubs')
+}
+// Hard-fail instead of silently producing unsigned/inconsistently signed release APKs.
+gradle.taskGraph.whenReady { graph ->
+    if (!hasStableSigning && graph.allTasks.any {
+            it.name.toLowerCase().contains('release') &&
+            (it.name.toLowerCase().startsWith('assemble') ||
+             it.name.toLowerCase().startsWith('package') ||
+             it.name.toLowerCase().startsWith('sign'))
+        }) {
+        throw new GradleException('Stable signing is not configured. Set UNLOCK_SIGNING_* environment variables.')
+    }
 }

@@ -1,38 +1,45 @@
-# UnlockMethod: AOD + lockscreen notification fingerprint (v0.2.1, experimental)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.2.2 test)
 
-A one-tap notification on the pulsing Always On Display (AOD), or the regular lockscreen, should request **the ROM's own fingerprint alternate bouncer** where eligible instead of immediately forcing the pattern/PIN/password bouncer.
+LSPosed module for SystemUI: when the user taps a notification on AOD/pulsing display or the regular lock screen, request the ROM's genuine UDFPS alternate bouncer when possible. The notification's real pending action remains owned by SystemUI.
 
-## What changed in v0.2
+**Status:** Experimental; not proven compatible with all PixelOS / Android 17 builds. Requires the ROM's existing AlternateBouncerInteractor to be present. No simulated biometric success, no StrongAuth bypass.
 
-- Recognizes notification taps on AOD/doze, including the wakeup-deferred pending action path; checks display interactivity *before* NotificationClicker wakes it, including the first tap after SystemUI starts.
-- Extends the tracked tap window to 8 seconds for an AOD tap (2.5 seconds on a normal lockscreen).
-- Replaces v0.1's blind bouncer suppression with a conditional request for **AlternateBouncerInteractor.forceShow**, after **canShowAlternateBouncerForFingerprint** approves and the display is no longer dozing.
-- Calls the ROM's own `updateAlternateBouncerShowing` to update the SystemUI state.
-- Keeps the actual notification launch/OnDismissAction inside SystemUI. We do not send PendingIntent, bypass the lockscreen, simulate biometric success, or relax StrongAuth.
-- For unsupported ROM versions, or when fingerprints are unavailable/locked out/StrongAuth is required, leave the original credential UI intact.
+## Recommended scope (new)
 
-## Install
+This **legacy Xposed** module now declares `xposedscope=com.android.systemui` in the Android manifest. On compatible LSPosed versions, **System UI (com.android.systemui)** should be preselected as the recommended scope when enabling the module. If already installed, check the scope after updating.
 
-1. Download `app-debug.apk` from the newest successful **Actions > Build LSPosed APK** run's `UnlockMethod-test-APK` artifact.
-2. Install APK; enable LSPosed module and select **System UI (com.android.systemui)** as scope.
-3. Restart the phone and test both paths:
-   - Normal lockscreen notification -> one tap -> fingerprint -> corresponding app.
-   - Screen off, notification pulses AOD -> one tap -> device wakes -> fingerprint -> corresponding app.
-4. Repeat after reboot before the *first* pattern unlock, and after fingerprint lockout: system should insist on credential input.
+## Stable signing (new)
 
-### Updating from v0.1
+The repo is **PUBLIC**. Do **not** add a keystore, password or base64 key to GitHub source code, Issues, pull requests, Actions logs or public artifacts.
 
-GitHub Actions makes a different temporary debug signing key on fresh runners, so updating the previously installed APK may produce `INSTALL_FAILED_UPDATE_INCOMPATIBLE`. Uninstall the old module APK, install the new APK, re-enable it in LSPosed, then reboot. The **repository is public**, and does not contain any private signing keystore.
+APK updates are only accepted by Android if the certificate matches. Earlier v0.1–v0.2.1 releases were signed with throwaway GitHub Runner debug keys, which were not retained. They **cannot be upgraded in place with the new key**. Uninstall the old module APK once, install the new fixed-signature `app-release.apk`, reenable it in LSPosed, and restart.
 
-## Diagnostics
+From v0.2.2 onward, all release builds use the same keystore stored in **GitHub Actions Secrets**, so later release APKs with this keystore can update in place. The first successful signed build requires a one-time secret setup using the **PRIVATE signing bundle provided separately to the owner**.
 
-LSPosed logs: filter for `NotifFingerprint:`. Expected diagnostics include
-`notification tapped on AOD/pulse`, `AOD wakeup`, and
-`used UDFPS alternate bouncer instead of pattern`. If the hook reports
-`... unavailable`, the system class/method is different.
+Set these four GitHub repository secrets at:
+[Actions secrets](https://github.com/Sol1tudeRain/UnlockMethod/settings/secrets/actions)
 
-### Known limitations
+| GitHub Action secret | Value |
+|---|---|
+| `UNLOCK_SIGNING_KEYSTORE_B64` | Entire text of `keystore-base64.txt` from the private bundle |
+| `UNLOCK_SIGNING_STORE_PASSWORD` | Entire text of `keystore-password.txt` from the private bundle |
+| `UNLOCK_SIGNING_KEY_ALIAS` | `unlockmethod` |
+| `UNLOCK_SIGNING_KEY_PASSWORD` | Same as `UNLOCK_SIGNING_STORE_PASSWORD` |
 
-**Not yet verified on the user's exact PixelOS / Android build.** SceneContainer/Compose SystemUI variants may use a different path or not provide the legacy manager fields. AOD's low-power display may not accept touch in exactly the same way on all devices. This module intentionally fails closed and does not suppress the credential screen if the platform's alternate bouncer is ineligible.
+Alternatively use `gh auth login`, then the bundle's `setup-github-secrets.sh` script on Linux/macOS/Termux/WSL. Keep the `.p12` and password safely backed up; GitHub Secrets are write-only and cannot serve as a keystore backup.
 
-If notification navigation breaks or SystemUI crashes, disable module in LSPosed and restart. For the next iteration attach the logs and `dumpsys activity service com.android.systemui/.SystemUIService` if available.
+After configuring secrets, go to [Actions](https://github.com/Sol1tudeRain/UnlockMethod/actions/workflows/build.yml), choose **Run workflow**, download `UnlockMethod-stable-signed-APK`, install `app-release.apk`.
+
+CI validates secrets before producing an APK; it does not quietly fall back to an unstable debug signature. Use `gradle :app:assembleDebug` only to test compilation locally.
+
+## Installation & tests
+
+1. Install the stable APK, enable in LSPosed, and make sure recommended scope **System UI** is checked.
+2. Reboot.
+3. Lock screen and tap a notification -> fingerprint unlock -> notification app.
+4. With screen off, receive notification to pulse AOD and tap **once** -> real UDFPS unlock -> app.
+5. Following a reboot, **before first pattern unlock**, the system must still require your pattern. Same for fingerprint lockout.
+
+If notifications do not open, SystemUI crashes, or the notification still asks for pattern, disable the module and reboot. Search LSPosed log for `NotifFingerprint:` and attach matching lines for diagnosis.
+
+**Certificate SHA-256 for the new signing key:** `d5c80d09dbb77948e3462d55155af87161f2004b97640e6f8cccf5e30fdea0a4`.
