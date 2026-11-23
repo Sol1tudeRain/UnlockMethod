@@ -1,6 +1,9 @@
 package dev.notifingerprint;
 
 import java.lang.reflect.Method;
+import android.content.Context;
+import android.os.PowerManager;
+import android.view.View;
 import java.util.concurrent.atomic.AtomicLong;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -22,6 +25,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
     private static final long NORMAL_WINDOW_MS = 2500L;
     private static final long AOD_WINDOW_MS = 8000L;
     private static final AtomicLong LAST_NOTIFICATION_TAP = new AtomicLong(0L);
+    private static final AtomicLong LAST_AOD_CLICK_HINT = new AtomicLong(0L);
     private static volatile boolean tapWasAod;
     private static volatile Object keyguardViewManager;
     private static final ThreadLocal<Boolean> REDIRECTING = new ThreadLocal<Boolean>();
@@ -62,11 +66,17 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
             try {
                 XposedBridge.hookAllMethods(clicker, "onClick", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        Object mgr = keyguardViewManager;
-                        if (mgr != null && showing(mgr) && isDozing(mgr)) {
-                            // This is only an AOD hint; the actual click is
-                            // confirmed at onNotificationClicked.
-                            tapWasAod = true;
+                        // Capture AOD before NotificationClicker wakes the display.
+                        // The manager may not yet be cached on the first tap.
+                        if (p.args != null && p.args.length > 0 &&
+                                p.args[0] instanceof View) {
+                            View view = (View) p.args[0];
+                            Object service = view.getContext().getSystemService(
+                                Context.POWER_SERVICE);
+                            if (service instanceof PowerManager &&
+                                    !((PowerManager) service).isInteractive()) {
+                                LAST_AOD_CLICK_HINT.set(now());
+                            }
                         }
                     }
                 });
@@ -110,6 +120,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             if (!returnsVoid(p) || !activeTap() || isRedirecting()) return;
                             if (showSystemAlternateBouncer(p.thisObject)) {
                                 LAST_NOTIFICATION_TAP.set(0);
+                                tapWasAod = false;
                                 p.setResult(null);
                                 log("used UDFPS alternate bouncer instead of pattern (manager)");
                             }
@@ -141,6 +152,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                         if (ret != Void.TYPE && ret != Boolean.TYPE) return;
                         if (showSystemAlternateBouncer(mgr)) {
                             LAST_NOTIFICATION_TAP.set(0);
+                            tapWasAod = false;
                             p.setResult(ret == Boolean.TYPE ? Boolean.TRUE : null);
                             log("used UDFPS alternate bouncer instead of pattern (interactor)");
                         }
@@ -149,12 +161,14 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 log("installed primary-interactor redirect");
             } catch (Throwable t) { log("primary-interactor redirect unavailable: " + t); }
         }
-        log("v0.2 AOD notification hook ready");
+        log("v0.2.1 AOD notification hook ready");
     }
 
     private static void recordTap(boolean aod) {
-        tapWasAod = aod || tapWasAod;
-        LAST_NOTIFICATION_TAP.set(now());
+        long current = now();
+        long hint = LAST_AOD_CLICK_HINT.getAndSet(0L);
+        tapWasAod = aod || (hint > 0 && current >= hint && current - hint <= 2000L);
+        LAST_NOTIFICATION_TAP.set(current);
         log("notification tapped on " + (tapWasAod ? "AOD/pulse" : "lockscreen"));
     }
 

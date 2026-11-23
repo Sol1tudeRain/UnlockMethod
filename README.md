@@ -1,10 +1,10 @@
-# UnlockMethod: AOD + lockscreen notification fingerprint (v0.2, experimental)
+# UnlockMethod: AOD + lockscreen notification fingerprint (v0.2.1, experimental)
 
 A one-tap notification on the pulsing Always On Display (AOD), or the regular lockscreen, should request **the ROM's own fingerprint alternate bouncer** where eligible instead of immediately forcing the pattern/PIN/password bouncer.
 
 ## What changed in v0.2
 
-- Recognizes notification taps on AOD/doze, including the wakeup-deferred pending action path.
+- Recognizes notification taps on AOD/doze, including the wakeup-deferred pending action path; checks display interactivity *before* NotificationClicker wakes it, including the first tap after SystemUI starts.
 - Extends the tracked tap window to 8 seconds for an AOD tap (2.5 seconds on a normal lockscreen).
 - Replaces v0.1's blind bouncer suppression with a conditional request for **AlternateBouncerInteractor.forceShow**, after **canShowAlternateBouncerForFingerprint** approves and the display is no longer dozing.
 - Calls the ROM's own `updateAlternateBouncerShowing` to update the SystemUI state.
