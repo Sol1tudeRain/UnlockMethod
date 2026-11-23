@@ -50,11 +50,18 @@ jobs:
       - name: Build fixed-signature APK
         run: gradle --no-daemon :app:assembleRelease
 
-      - name: Verify stable APK signature
+      - name: Verify stable APK signature and fixed certificate identity
         shell: bash
         run: |
           APK="app/build/outputs/apk/release/app-release.apk"
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL_CERT="$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)"
+          EXPECTED_CERT="d5c80d09dbb77948e3462d55155af87161f2004b97640e6f8cccf5e30fdea0a4"
+          if [[ "$ACTUAL_CERT" != "$EXPECTED_CERT" ]]; then
+            echo "::error::APK was signed using the wrong certificate. Do not distribute."
+            exit 1
+          fi
 
       - name: Remove private key from runner
         if: always()
