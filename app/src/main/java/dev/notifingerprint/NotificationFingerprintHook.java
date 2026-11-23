@@ -28,6 +28,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
     private static final AtomicLong LAST_AOD_CLICK_HINT = new AtomicLong(0L);
     private static volatile boolean tapWasAod;
     private static volatile Object keyguardViewManager;
+    private static volatile boolean altMethodsDumped;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
@@ -105,7 +106,14 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             keyguardViewManager = p.thisObject;
                             if (activeTap()) {
                                 if (isDozing(p.thisObject)) tapWasAod = true;
-                                log("PATH dismissWithAction dozing=" + isDozing(p.thisObject) +
+                                log("PATH dismissWithAction before dozing=" + isDozing(p.thisObject) +
+                                    " " + alternateStatus(p.thisObject));
+                            }
+                        }
+                        @Override protected void afterHookedMethod(MethodHookParam p) {
+                            if (activeTap()) {
+                                log("PATH dismissWithAction after pendingWakeup=" +
+                                    (field(p.thisObject, "mPendingWakeupAction") != null) +
                                     " " + alternateStatus(p.thisObject));
                             }
                         }
@@ -184,6 +192,11 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 XposedBridge.hookAllMethods(primary, "show", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         Object mgr = keyguardViewManager;
+                        if (activeTap()) {
+                            log("INTERACTOR_SHOW_ENTRY signature=" + p.method +
+                                " args=" + (p.args == null ? "null" : p.args.length) +
+                                " manager=" + (mgr != null));
+                        }
                         if (mgr == null || !activeTap() ||
                             p.args == null || p.args.length == 0 ||
                             !(p.args[0] instanceof Boolean)) return;
@@ -215,8 +228,10 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 try {
                     XposedBridge.hookAllMethods(scene, methodName, new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) {
-                            if (!activeTap() ||
-                                p.args == null || p.args.length < 2) return;
+                            if (!activeTap()) return;
+                            log("SCENE_METHOD_ENTRY method=" + p.method +
+                                " args=" + (p.args == null ? "null" : p.args.length));
+                            if (p.args == null || p.args.length < 2) return;
                             String target = String.valueOf(p.args[0]);
                             // Trace scene changes before filtering. The user's
                             // SceneContainer may choose a different target string.
@@ -249,7 +264,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.5 FINGERPRINT PRIORITY: late bouncer redirect; dismissWithAction untouched");
+        log("v0.5.1 diagnostics: inspect runtime alternate bouncer methods and failures");
     }
 
     private static void recordTap(boolean aod) {
@@ -334,6 +349,25 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         if (mgr == null) return "alt=(no manager)";
         Object alternate = field(mgr, "mAlternateBouncerInteractor");
         if (alternate == null) return "alt=(missing interactor)";
+        if (!altMethodsDumped) {
+            altMethodsDumped = true;
+            log("ALT_RUNTIME_CLASS=" + alternate.getClass().getName());
+            Class<?> cls = alternate.getClass();
+            int printed = 0;
+            while (cls != null && cls != Object.class) {
+                for (Method m : cls.getDeclaredMethods()) {
+                    String n = m.getName().toLowerCase(java.util.Locale.ROOT);
+                    if (n.contains("show") || n.contains("bouncer") ||
+                        n.contains("finger") || n.contains("visible") ||
+                        n.contains("auth")) {
+                        if (++printed > 35) break;
+                        log("ALT_RUNTIME_METHOD " + m.toGenericString());
+                    }
+                }
+                cls = cls.getSuperclass();
+                if (printed > 35) break;
+            }
+        }
         return "dozing=" + isDozing(mgr) +
             " eligible=" + optBool(alternate, "canShowAlternateBouncerForFingerprint") +
             " visible=" + optBool(alternate, "isVisibleState");
@@ -371,7 +405,14 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         try {
             Object result = XposedHelpers.callMethod(target, method);
             return result instanceof Boolean ? (Boolean) result : null;
-        } catch (Throwable ignored) { return null; }
+        } catch (Throwable e) {
+            if ("canShowAlternateBouncerForFingerprint".equals(method) ||
+                "isVisibleState".equals(method)) {
+                log("ALT_METHOD_ERROR " + method + " on " +
+                    target.getClass().getName() + ": " + brief(e));
+            }
+            return null;
+        }
     }
     private static long now() {
         return android.os.SystemClock.elapsedRealtime();

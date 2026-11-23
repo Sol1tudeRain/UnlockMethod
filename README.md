@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.5 fingerprint-first test)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.5.1 fingerprint compatibility diagnostic)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
@@ -88,3 +88,13 @@ The exact PixelOS build may use a different route; this is an experimental prior
 `su -c 'grep -ih "NotifFingerprint" /data/adb/lspd/log/modules_*.log | tail -n 90'`
 
 Look for `FP_SHOWN`, `FP_SKIP`, `FP_PRIORITY`, `PRIMARY`, and `SCENE_REQUEST` lines after tapping an AOD notification.
+
+
+## v0.5.1: isolate eligible=null and missing credential hooks
+
+- Logs actual runtime class and up to 35 alternate-bouncer method signatures as `ALT_RUNTIME_METHOD` once on first tap.
+- Logs exceptions as `ALT_METHOD_ERROR` when checking `canShowAlternateBouncerForFingerprint()` and `isVisibleState()`.
+- Logs the entry signatures of `PrimaryBouncerInteractor.show` and `SceneInteractor.changeScene/snapToScene`, even when parameters don't match the previous redirect code.
+- Logs `dismissWithAction` both before and after completion to see whether the post-unlock action remains queued.
+
+The existing security checks remain unchanged, and this version does not override fingerprint eligibility if it cannot be verified. No claims that the ROM's UDFPS path is working are warranted until on-device logs confirm it. Inspect LSPosed module logs, not just logcat.
