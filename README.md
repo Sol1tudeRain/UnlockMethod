@@ -1,14 +1,14 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.2.2 test)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.3 diagnostic test)
 
 LSPosed module for SystemUI: when the user taps a notification on AOD/pulsing display or the regular lock screen, request the ROM's genuine UDFPS alternate bouncer when possible. The notification's real pending action remains owned by SystemUI.
 
 **Status:** Experimental; not proven compatible with all PixelOS / Android 17 builds. Requires the ROM's existing AlternateBouncerInteractor to be present. No simulated biometric success, no StrongAuth bypass.
 
-## Recommended scope (new)
+## Recommended scope
 
 This **legacy Xposed** module now declares `xposedscope=com.android.systemui` in the Android manifest. On compatible LSPosed versions, **System UI (com.android.systemui)** should be preselected as the recommended scope when enabling the module. If already installed, check the scope after updating.
 
-## Stable signing (new)
+## Stable signing
 
 The repo is **PUBLIC**. Do **not** add a keystore, password or base64 key to GitHub source code, Issues, pull requests, Actions logs or public artifacts.
 
@@ -43,3 +43,16 @@ CI validates secrets before producing an APK; it does not quietly fall back to a
 If notifications do not open, SystemUI crashes, or the notification still asks for pattern, disable the module and reboot. Search LSPosed log for `NotifFingerprint:` and attach matching lines for diagnosis.
 
 **Certificate SHA-256 for the new signing key:** `d5c80d09dbb77948e3462d55155af87161f2004b97640e6f8cccf5e30fdea0a4`.
+
+## v0.3 AOD diagnostics and changes
+
+v0.3 adds explicit logging of the AOD->keyguard dismissal path and tries both SystemUI versions of the real fingerprint alternate bouncer: modern `forceShow()` and legacy `show()`. It also observes the new `SceneInteractor.changeScene(Scenes.Bouncer,...)` path used by some SceneContainer ROMs. **The platform's own fingerprint eligibility gate must explicitly return true**: if the device requires a pattern after boot/lockout, it will still show the pattern.
+
+Test by waking the device from a notification pulse in AOD, **tapping the notification once**, and looking for `NotifFingerprint` in LSPosed logs or rooted `logcat`. An important diagnostic pattern is:
+- `CLICK notification on AOD/pulse`: click captured
+- `PATH dismissWithAction`: pending notification action tracked
+- `PRIMARY` or `SCENE`: which credential route was requested
+- `ALT_SKIPPED`, `ALT_NOT_VISIBLE` or `ALT_ERROR`: why the fingerprint UI could not be shown
+- `ALT_SHOWN`: the system fingerprint UI is visible and the pattern route was suppressed
+
+If no `CLICK` line appears, that SystemUI version may use a different click handler. **Still experimental; successful compilation is not a functional test.**
