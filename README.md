@@ -1,4 +1,4 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.6.1 AOD fingerprint state compatibility)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.6.2 UDFPS gate diagnosis)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
 
@@ -110,3 +110,9 @@ The user's v0.6 logs show the notification is clicked on AOD, `mDozing=false` be
 v0.6.1 no longer uses `isShowing()` as an unconditional veto. Instead it checks the ROM's own `canShowAlternateBouncer` StateFlow, and requires it to be **explicitly true**. It also vetoes requests during doze, for an already-unlocked keyguard, and for occlusion; unknown/false biometric permissions remain fail-closed. The original notification dismissal actions are not forged or replayed.
 
 New diagnostic lines: `FP_STATE` (showing, unlocked, dozing) and `FP_GATE_RESULT` (actual permission status). If the gate is false, UDFPS will not be forced; look for its reason before proceeding.
+
+
+## v0.6.2: Distinguish real policy false from cold StateFlow false
+New `FP_CAUSES` lines are emitted at three points: after AOD dozing changes, before pending action wake resumes, and before the primary pattern bouncer is shown. They read only `alternateBouncerSupported`, `canShowAlternateBouncer`, `mListenForCanShowAlternateBouncer`, `primaryBouncerShow`, `isFingerprintAuthCurrentlyAllowed`, `isFingerprintLockedOut`, `isKeyguardDismissible`, and the current scene/state when available.
+
+This matters because the newer AOSP `canShowAlternateBouncer` is a `stateIn(WhileSubscribed(), initialValue=false)`. If the SystemUI collector never starts, its value can stay false even if the underlying biometric conditions are otherwise allowed. AOSP `StatusBarKeyguardViewManager.registerListeners` normally subscribes to that flow. **v0.6.2 diagnoses whether the collector or an actual eligibility condition is failing.** It does not alter fingerprint policy or skip authentication. The current v0.6.1 fingerprint-priority behavior is retained unchanged.

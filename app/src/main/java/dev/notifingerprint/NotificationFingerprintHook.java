@@ -108,6 +108,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                                 if (isDozing(p.thisObject)) tapWasAod = true;
                                 log("PATH dismissWithAction before dozing=" + isDozing(p.thisObject) +
                                     " " + alternateStatus(p.thisObject));
+                                if (!isDozing(p.thisObject)) {
+                                    logAlternateGate("dismiss-before", p.thisObject);
+                                }
                             }
                         }
                         @Override protected void afterHookedMethod(MethodHookParam p) {
@@ -128,6 +131,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             if (activeTap()) {
                                 log("PATH launchPendingWakeupAction dozing=" + isDozing(p.thisObject) +
                                     " AOD=" + tapWasAod + " " + alternateStatus(p.thisObject));
+                                logAlternateGate("wake-action-before", p.thisObject);
                             }
                         }
                     });
@@ -139,6 +143,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                         keyguardViewManager = p.thisObject;
                         if (activeTap()) log("PATH onDozingChanged to=" +
                             (p.args != null && p.args.length > 0 ? p.args[0] : "?"));
+                    }
+                    @Override protected void afterHookedMethod(MethodHookParam p) {
+                        if (activeTap()) logAlternateGate("doze-changed-after", p.thisObject);
                     }
                 });
             } catch (Throwable t) { log("doze observer unavailable: " + t); }
@@ -265,7 +272,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.6.1: bypass stale manager.isShowing veto; rely on ROM biometric state flow");
+        log("v0.6.2: read-only AOD UDFPS gate diagnostics before, during, after wakeup");
     }
 
     private static void recordTap(boolean aod) {
@@ -326,6 +333,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         Boolean eligible = currentAlternateEligibility(alternate, mgr);
         log("FP_GATE_RESULT=" + eligible);
         if (!Boolean.TRUE.equals(eligible)) {
+            log("FP_CAUSES at-primary " + alternateGateDiagnostics(alternate, mgr));
+        }
+        if (!Boolean.TRUE.equals(eligible)) {
             log("FP_SKIP platform eligibility=" + eligible);
             return false;
         }
@@ -361,6 +371,54 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
             t = t.getCause();
         }
         return false;
+    }
+
+    // Read-only diagnostic of the individual gates feeding canShowAlternateBouncer.
+    // Never writes StateFlow/repository state or forges a biometric result.
+    private static void logAlternateGate(String stage, Object mgr) {
+        Object alternate = field(mgr, "mAlternateBouncerInteractor");
+        if (alternate != null && activeTap()) {
+            log("FP_CAUSES " + stage + " " + alternateGateDiagnostics(alternate, mgr));
+        }
+    }
+
+    private static String alternateGateDiagnostics(Object alternate, Object mgr) {
+        Object repo = field(alternate, "bouncerRepository");
+        Object biometrics = field(alternate, "biometricSettingsRepository");
+        Object update = field(alternate, "keyguardUpdateMonitor");
+        Object keyguardLazy = field(alternate, "keyguardInteractor");
+        Object keyguard = lazyGet(keyguardLazy);
+        Object managerScene = lazyGet(field(mgr, "mSceneInteractorLazy"));
+        Object transition = field(mgr, "mKeyguardTransitionInteractor");
+        Object listener = field(mgr, "mListenForCanShowAlternateBouncer");
+        return "supported=" + readState(alternate, "alternateBouncerSupported") +
+            " flow=" + readState(alternate, "canShowAlternateBouncer") +
+            " listener=" + (listener == null ? "absent" : "active?"+optBool(listener,"isActive")) +
+            " primaryShowing=" + readState(repo, "primaryBouncerShow") +
+            " fingerprintPolicy=" + readState(biometrics, "isFingerprintAuthCurrentlyAllowed") +
+            " fpLocked=" + optBool(update, "isFingerprintLockedOut") +
+            " keyguardDismissible=" + readState(keyguard, "isKeyguardDismissible") +
+            " currentScene=" + readState(managerScene, "currentScene") +
+            " keyguardState=" + readState(transition, "currentKeyguardState") +
+            " managerDozing=" + isDozing(mgr);
+    }
+    private static Object lazyGet(Object lazy) {
+        if (lazy == null) return null;
+        try { return XposedHelpers.callMethod(lazy, "get"); }
+        catch (Throwable t) { return null; }
+    }
+    private static String readState(Object holder, String name) {
+        if (holder == null) return "no-holder";
+        Object stream = field(holder, name);
+        if (stream == null) {
+            try {
+                stream = XposedHelpers.callMethod(holder,
+                    "get" + Character.toUpperCase(name.charAt(0)) + name.substring(1));
+            } catch (Throwable ignored) {}
+        }
+        if (stream == null) return "no-field";
+        try { return String.valueOf(XposedHelpers.callMethod(stream, "getValue")); }
+        catch (Throwable t) { return "non-state-flow(" + stream.getClass().getSimpleName() + ")"; }
     }
 
     // Prefer the ROM's own StateFlow decision; do not bypass a false result.
