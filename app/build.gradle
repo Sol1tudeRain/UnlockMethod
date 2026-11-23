@@ -7,8 +7,8 @@ android {
         applicationId 'dev.notifingerprint'
         minSdk 29
         targetSdk 35
-        versionCode 1
-        versionName '0.1-test'
+        versionCode 2
+        versionName '0.2-aod-test'
     }
     buildTypes {
         debug { }
@@ -20,6 +20,6 @@ android {
     }
 }
 dependencies {
-    // Compile-only interfaces; never package these dummy APIs in the APK.
+    // Compile-only Xposed interfaces; these must not be bundled into the APK.
     compileOnly project(':xposed-stubs')
 }

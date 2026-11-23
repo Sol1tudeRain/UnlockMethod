@@ -9,138 +9,213 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * SystemUI-only, fail-closed notification-tap compatibility hook.
- * This never synthesizes biometric authentication, changes lockout,
- * or relaxes the device's StrongAuth policy.
+ * Notification-tap-only request for SystemUI's real UDFPS alternate bouncer.
  *
- * ROM class/field names vary: unsupported variants simply do nothing.
+ * AOD notification clicks can be handled after the Doze-to-keyguard wakeup,
+ * hence the longer time window for an AOD click.  We never synthesize a
+ * biometric success, bypass StrongAuth, or launch the notification ourselves.
+ * SystemUI still owns the original pending OnDismissAction.
+ *
+ * Fail-closed: if any required ROM method/instance is missing, do nothing.
  */
 public final class NotificationFingerprintHook implements IXposedHookLoadPackage {
-    private static final long WINDOW_MS = 1750L;
-    private static final AtomicLong LAST_TAP = new AtomicLong(0L);
-    private static volatile Object manager;
+    private static final long NORMAL_WINDOW_MS = 2500L;
+    private static final long AOD_WINDOW_MS = 8000L;
+    private static final AtomicLong LAST_NOTIFICATION_TAP = new AtomicLong(0L);
+    private static volatile boolean tapWasAod;
+    private static volatile Object keyguardViewManager;
+    private static final ThreadLocal<Boolean> REDIRECTING = new ThreadLocal<Boolean>();
 
-    @Override public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
+    @Override
+    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
         if (!"com.android.systemui".equals(load.packageName)) return;
-        ClassLoader cl = load.classLoader;
-        int clicks = 0;
-        int bouncers = 0;
+        final ClassLoader cl = load.classLoader;
 
         Class<?> starter = XposedHelpers.findClassIfExists(
             "com.android.systemui.statusbar.phone.StatusBarNotificationActivityStarter", cl);
         if (starter != null) {
             try {
-                XposedBridge.hookAllMethods(starter, "onNotificationClicked", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        Object keyguard = field(p.thisObject, "mKeyguardStateController");
-                        if (!bool(keyguard, "isShowing")) return;
-                        Object m = field(p.thisObject, "mStatusBarKeyguardViewManager");
-                        if (m != null) manager = m;
-                        LAST_TAP.set(now());
-                    }
-                });
-                clicks++;
-            } catch (Throwable e) { log("starter hook: " + e); }
-        }
+                XposedBridge.hookAllMethods(starter, "onNotificationClicked",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            Object state = field(p.thisObject, "mKeyguardStateController");
+                            if (!bool(state, "isShowing")) return;
 
-        Class<?> mgr = XposedHelpers.findClassIfExists(
-            "com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager", cl);
-        if (mgr != null) {
-            try {
-                XposedBridge.hookAllMethods(mgr, "dismissWithAction", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        manager = p.thisObject;
-                    }
-                });
-            } catch (Throwable e) { log("manager tracking: " + e); }
-            try {
-                XposedBridge.hookAllMethods(mgr, "showPrimaryBouncer", new XC_MethodHook() {
-                    @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        manager = p.thisObject;
-                        if (isVoid(p) && canKeepFingerprint(p.thisObject)) {
-                            LAST_TAP.set(0);
-                            p.setResult(null);
-                            log("held lockscreen at showPrimaryBouncer");
+                            Object mgr = field(p.thisObject, "mStatusBarKeyguardViewManager");
+                            if (mgr != null) keyguardViewManager = mgr;
+
+                            Object controller = field(p.thisObject, "mStatusBarStateController");
+                            boolean fromAod = isDozing(mgr) || bool(controller, "isDozing");
+                            recordTap(fromAod);
                         }
-                    }
-                });
-                bouncers++;
-            } catch (Throwable e) { log("manager bouncer: " + e); }
+                    });
+                log("installed notification click handler");
+            } catch (Throwable t) { log("click handler unavailable: " + t); }
         }
 
-        // Older ROM notification click handling.
+        // New and old notification clickers both wake the display before
+        // dispatching the action. We deliberately do not intercept their
+        // wakeUpIfDozing calls, nor trigger a second notification click.
         Class<?> clicker = XposedHelpers.findClassIfExists(
             "com.android.systemui.statusbar.notification.NotificationClicker", cl);
         if (clicker != null) {
             try {
                 XposedBridge.hookAllMethods(clicker, "onClick", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        if (manager != null && showing(manager)) LAST_TAP.set(now());
+                        Object mgr = keyguardViewManager;
+                        if (mgr != null && showing(mgr) && isDozing(mgr)) {
+                            // This is only an AOD hint; the actual click is
+                            // confirmed at onNotificationClicked.
+                            tapWasAod = true;
+                        }
                     }
                 });
-                clicks++;
-            } catch (Throwable e) { log("clicker hook: " + e); }
+                log("installed AOD click observer");
+            } catch (Throwable t) { log("AOD click observer unavailable: " + t); }
         }
 
+        Class<?> manager = XposedHelpers.findClassIfExists(
+            "com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager", cl);
+        if (manager != null) {
+            try {
+                XposedBridge.hookAllMethods(manager, "dismissWithAction",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            keyguardViewManager = p.thisObject;
+                            if (activeTap() && isDozing(p.thisObject)) {
+                                tapWasAod = true;
+                                log("AOD dismiss action pending wakeup; leaving action intact");
+                            }
+                        }
+                    });
+            } catch (Throwable t) { log("dismiss action observer unavailable: " + t); }
+
+            try {
+                XposedBridge.hookAllMethods(manager, "launchPendingWakeupAction",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            keyguardViewManager = p.thisObject;
+                            if (activeTap() && tapWasAod) {
+                                log("AOD wakeup: allowing original pending action to resume");
+                            }
+                        }
+                    });
+            } catch (Throwable t) { log("wakeup observer unavailable: " + t); }
+
+            try {
+                XposedBridge.hookAllMethods(manager, "showPrimaryBouncer",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam p) {
+                            keyguardViewManager = p.thisObject;
+                            if (!returnsVoid(p) || !activeTap() || isRedirecting()) return;
+                            if (showSystemAlternateBouncer(p.thisObject)) {
+                                LAST_NOTIFICATION_TAP.set(0);
+                                p.setResult(null);
+                                log("used UDFPS alternate bouncer instead of pattern (manager)");
+                            }
+                        }
+                    });
+                log("installed primary-bouncer redirect");
+            } catch (Throwable t) { log("primary-bouncer redirect unavailable: " + t); }
+        }
+
+        // Some SystemUI versions call the primary interactor directly instead
+        // of going through StatusBarKeyguardViewManager.showPrimaryBouncer().
+        // Verify that it belongs to the very same tracked manager before
+        // applying the redirect.
         for (String name : new String[] {
             "com.android.systemui.bouncer.domain.interactor.PrimaryBouncerInteractor",
             "com.android.systemui.keyguard.domain.interactor.PrimaryBouncerInteractor"
         }) {
-            Class<?> c = XposedHelpers.findClassIfExists(name, cl);
-            if (c == null) continue;
+            Class<?> primary = XposedHelpers.findClassIfExists(name, cl);
+            if (primary == null) continue;
             try {
-                XposedBridge.hookAllMethods(c, "show", new XC_MethodHook() {
+                XposedBridge.hookAllMethods(primary, "show", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
-                        if (!isVoid(p) || p.args == null || p.args.length == 0 ||
+                        Object mgr = keyguardViewManager;
+                        if (mgr == null || !activeTap() || isRedirecting() ||
+                            p.args == null || p.args.length == 0 ||
                             !(p.args[0] instanceof Boolean)) return;
-                        if (canKeepFingerprint(manager)) {
-                            LAST_TAP.set(0);
-                            p.setResult(null);
-                            log("held lockscreen at PrimaryBouncerInteractor.show");
+                        if (field(mgr, "mPrimaryBouncerInteractor") != p.thisObject) return;
+                        Class<?> ret = returnType(p);
+                        if (ret != Void.TYPE && ret != Boolean.TYPE) return;
+                        if (showSystemAlternateBouncer(mgr)) {
+                            LAST_NOTIFICATION_TAP.set(0);
+                            p.setResult(ret == Boolean.TYPE ? Boolean.TRUE : null);
+                            log("used UDFPS alternate bouncer instead of pattern (interactor)");
                         }
                     }
                 });
-                bouncers++;
-            } catch (Throwable e) { log("interactor hook: " + e); }
+                log("installed primary-interactor redirect");
+            } catch (Throwable t) { log("primary-interactor redirect unavailable: " + t); }
         }
-        log("loaded clickHooks=" + clicks + " bouncerHooks=" + bouncers);
+        log("v0.2 AOD notification hook ready");
     }
 
-    private static boolean canKeepFingerprint(Object mgr) {
-        long tap = LAST_TAP.get();
-        long age = now() - tap;
-        if (tap == 0 || age < 0 || age > WINDOW_MS || mgr == null || !showing(mgr))
-            return false;
+    private static void recordTap(boolean aod) {
+        tapWasAod = aod || tapWasAod;
+        LAST_NOTIFICATION_TAP.set(now());
+        log("notification tapped on " + (tapWasAod ? "AOD/pulse" : "lockscreen"));
+    }
 
-        Object monitor = field(mgr, "mKeyguardUpdateManager");
-        if (monitor == null) monitor = field(mgr, "mKeyguardUpdateMonitor");
-        if (monitor == null) return false;
+    private static boolean activeTap() {
+        long t = LAST_NOTIFICATION_TAP.get();
+        if (t == 0L) return false;
+        long age = now() - t;
+        if (age >= 0L && age <= (tapWasAod ? AOD_WINDOW_MS : NORMAL_WINDOW_MS)) return true;
+        LAST_NOTIFICATION_TAP.compareAndSet(t, 0L);
+        tapWasAod = false;
+        return false;
+    }
 
-        // If any of these checks cannot be verified, do not suppress credential UI.
-        if (!bool(monitor, "isUdfpsEnrolled")) return false;
-        if (bool(monitor, "isFingerprintLockedOut") ||
-            bool(monitor, "isFingerprintLockedOutPermanent")) return false;
-
-        Boolean allowed = optionalBool(monitor, "isUnlockingWithFingerprintAllowed");
-        if (allowed == null) {
-            try {
-                Object result = XposedHelpers.callMethod(monitor,
-                    "isUnlockingWithBiometricAllowed", true);
-                allowed = (result instanceof Boolean) ? (Boolean) result : null;
-            } catch (Throwable ignored) { return false; }
-        }
-        if (!Boolean.TRUE.equals(allowed)) return false;
-
+    private static boolean showSystemAlternateBouncer(Object mgr) {
+        if (mgr == null || !showing(mgr) || isDozing(mgr)) return false;
         Object state = field(mgr, "mKeyguardStateController");
-        if (Boolean.TRUE.equals(optionalBool(state, "isOccluded"))) return false;
-        return true;
+        if (Boolean.TRUE.equals(optBool(state, "isOccluded"))) return false;
+
+        Object alternate = field(mgr, "mAlternateBouncerInteractor");
+        if (alternate == null ||
+            !Boolean.TRUE.equals(optBool(alternate, "canShowAlternateBouncerForFingerprint"))) {
+            return false;
+        }
+
+        // The ROM's own canShowAlternateBouncerForFingerprint() checks
+        // biometric eligibility, lockout, dozing and bouncer state.
+        // Only the ROM performs biometric authentication.
+        REDIRECTING.set(Boolean.TRUE);
+        try {
+            XposedHelpers.callMethod(alternate, "forceShow");
+            if (!Boolean.TRUE.equals(optBool(alternate, "isVisibleState"))) return false;
+
+            // Keep SystemUI scrim, accessibility, and fingerprint UI in sync.
+            // This method is normally called from the original showBouncer().
+            XposedHelpers.callMethod(mgr, "updateAlternateBouncerShowing", true);
+            return true;
+        } catch (Throwable t) {
+            log("alternate bouncer redirect failed; keeping original credential path: " + t);
+            return false;
+        } finally {
+            REDIRECTING.remove();
+        }
     }
 
     private static boolean showing(Object mgr) {
         return bool(field(mgr, "mKeyguardStateController"), "isShowing");
     }
-    private static boolean isVoid(XC_MethodHook.MethodHookParam p) {
-        return p.method instanceof Method && ((Method)p.method).getReturnType() == Void.TYPE;
+    private static boolean isDozing(Object mgr) {
+        if (mgr == null) return false;
+        Object value = field(mgr, "mDozing");
+        if (value instanceof Boolean) return (Boolean) value;
+        return bool(field(mgr, "mStatusBarStateController"), "isDozing");
+    }
+    private static boolean returnsVoid(XC_MethodHook.MethodHookParam p) {
+        return returnType(p) == Void.TYPE;
+    }
+    private static Class<?> returnType(XC_MethodHook.MethodHookParam p) {
+        return (p.method instanceof Method) ? ((Method) p.method).getReturnType() : null;
+    }
+    private static boolean isRedirecting() {
+        return Boolean.TRUE.equals(REDIRECTING.get());
     }
     private static Object field(Object target, String name) {
         if (target == null) return null;
@@ -148,9 +223,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         catch (Throwable ignored) { return null; }
     }
     private static boolean bool(Object target, String method) {
-        return Boolean.TRUE.equals(optionalBool(target, method));
+        return Boolean.TRUE.equals(optBool(target, method));
     }
-    private static Boolean optionalBool(Object target, String method) {
+    private static Boolean optBool(Object target, String method) {
         if (target == null) return null;
         try {
             Object result = XposedHelpers.callMethod(target, method);
@@ -158,12 +233,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } catch (Throwable ignored) { return null; }
     }
     private static long now() {
-        try {
-            Class<?> systemClock = Class.forName("android.os.SystemClock");
-            return (Long) systemClock.getMethod("elapsedRealtime").invoke(null);
-        } catch (Throwable ignored) {
-            return System.nanoTime() / 1_000_000L;
-        }
+        return android.os.SystemClock.elapsedRealtime();
     }
-    private static void log(String m) { XposedBridge.log("NotifFingerprint: " + m); }
+    private static void log(String message) {
+        XposedBridge.log("NotifFingerprint: " + message);
+    }
 }
