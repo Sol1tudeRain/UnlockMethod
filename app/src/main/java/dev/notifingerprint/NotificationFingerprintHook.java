@@ -12,14 +12,14 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Notification-tap-only request for SystemUI's real UDFPS alternate bouncer.
+ * Safety-first AOD/lockscreen notification diagnostic module.
  *
- * AOD notification clicks can be handled after the Doze-to-keyguard wakeup,
- * hence the longer time window for an AOD click.  We never synthesize a
- * biometric success, bypass StrongAuth, or launch the notification ourselves.
- * SystemUI still owns the original pending OnDismissAction.
+ * v0.4.1 disables ALL credential-route interception to avoid breaking a
+ * pending notification launch after keyguard authentication. It only observes
+ * notification clicks and bouncer transitions; it never sets hook results,
+ * invokes alternate bouncers, sends PendingIntents, or bypasses auth.
  *
- * Fail-closed: if any required ROM method/instance is missing, do nothing.
+ * Fingerprint preference will need separate ROM-specific validation.
  */
 public final class NotificationFingerprintHook implements IXposedHookLoadPackage {
     private static final long NORMAL_WINDOW_MS = 3500L;
@@ -28,7 +28,6 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
     private static final AtomicLong LAST_AOD_CLICK_HINT = new AtomicLong(0L);
     private static volatile boolean tapWasAod;
     private static volatile Object keyguardViewManager;
-    private static final ThreadLocal<Boolean> REDIRECTING = new ThreadLocal<Boolean>();
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam load) {
@@ -142,15 +141,12 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 XposedBridge.hookAllMethods(manager, "showBouncer", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         keyguardViewManager = p.thisObject;
-                        if (!activeTap() || isRedirecting()) return;
+                        if (!activeTap()) return;
                         log("PRIMARY showBouncer; return=" + returnType(p) +
                             " " + alternateStatus(p.thisObject));
-                        if (returnsVoid(p) && showSystemAlternateBouncer(p.thisObject)) {
-                            LAST_NOTIFICATION_TAP.set(0L);
-                            tapWasAod = false;
-                            p.setResult(null);
-                            log("REDIRECT showBouncer -> fingerprint UI");
-                        }
+                        // Navigation safety hotfix: NEVER suppress this method.
+                        // SystemUI owns its keyguard dismiss and notification action.
+                        log("SAFE_PASS showBouncer (original action preserved)");
                     }
                 });
                 log("HOOK_OK StatusBarKeyguardViewManager.showBouncer");
@@ -160,14 +156,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) {
                             keyguardViewManager = p.thisObject;
-                            if (!returnsVoid(p) || !activeTap() || isRedirecting()) return;
+                            if (!activeTap()) return;
                             log("PRIMARY showPrimaryBouncer requested; " + alternateStatus(p.thisObject));
-                            if (showSystemAlternateBouncer(p.thisObject)) {
-                                LAST_NOTIFICATION_TAP.set(0);
-                                tapWasAod = false;
-                                p.setResult(null);
-                                log("used UDFPS alternate bouncer instead of pattern (manager)");
-                            }
+                            log("SAFE_PASS showPrimaryBouncer (original action preserved)");
                         }
                     });
                 log("installed primary-bouncer redirect");
@@ -188,7 +179,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 XposedBridge.hookAllMethods(primary, "show", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         Object mgr = keyguardViewManager;
-                        if (mgr == null || !activeTap() || isRedirecting() ||
+                        if (mgr == null || !activeTap() ||
                             p.args == null || p.args.length == 0 ||
                             !(p.args[0] instanceof Boolean)) return;
                         Object declared = field(mgr, "mPrimaryBouncerInteractor");
@@ -197,13 +188,9 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                         log("PRIMARY interactor.show requested; return=" + 
                             (ret == null ? "unknown" : ret.getName()) +
                             " " + alternateStatus(mgr));
-                        if (ret != Void.TYPE && ret != Boolean.TYPE) return;
-                        if (showSystemAlternateBouncer(mgr)) {
-                            LAST_NOTIFICATION_TAP.set(0);
-                            tapWasAod = false;
-                            p.setResult(ret == Boolean.TYPE ? Boolean.TRUE : null);
-                            log("used UDFPS alternate bouncer instead of pattern (interactor)");
-                        }
+                        // Let the primary bouncer record its dismiss action.
+                        // No forced alternative UI or altered return values.
+                        log("SAFE_PASS PrimaryBouncerInteractor.show");
                     }
                 });
                 log("installed primary-interactor redirect");
@@ -217,7 +204,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 try {
                     XposedBridge.hookAllMethods(scene, methodName, new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) {
-                            if (!activeTap() || isRedirecting() ||
+                            if (!activeTap() ||
                                 p.args == null || p.args.length < 2) return;
                             String target = String.valueOf(p.args[0]);
                             // Trace scene changes before filtering. The user's
@@ -233,13 +220,8 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                             log("SCENE " + route + " -> Bouncer; reason=" +
                                 String.valueOf(p.args[1]) + " manager=" + (mgr != null) +
                                 " " + alternateStatus(mgr));
-                            if (returnsVoid(p) && mgr != null &&
-                                showSystemAlternateBouncer(mgr)) {
-                                LAST_NOTIFICATION_TAP.set(0);
-                                tapWasAod = false;
-                                p.setResult(null);
-                                log("SCENE Bouncer replaced by system fingerprint UI");
-                            }
+                            log("SAFE_PASS SceneInteractor." + route +
+                                " (original transition preserved)");
                         }
                     });
                     log("HOOK_OK SceneInteractor." + route);
@@ -248,7 +230,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.4 AOD direct-click hook ready");
+        log("v0.4.1 SAFE MODE: all credential methods observation-only; notification launch untouched");
     }
 
     private static void recordTap(boolean aod) {
@@ -270,70 +252,6 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         return false;
     }
 
-    private static boolean showSystemAlternateBouncer(Object mgr) {
-        if (mgr == null || !showing(mgr)) {
-            log("ALT_SKIPPED: no manager or keyguard not showing");
-            return false;
-        }
-        if (isDozing(mgr)) {
-            log("ALT_SKIPPED: display still dozing");
-            return false;
-        }
-        Object state = field(mgr, "mKeyguardStateController");
-        if (Boolean.TRUE.equals(optBool(state, "isOccluded"))) {
-            log("ALT_SKIPPED: keyguard occluded");
-            return false;
-        }
-
-        Object alternate = field(mgr, "mAlternateBouncerInteractor");
-        if (alternate == null) {
-            log("ALT_SKIPPED: mAlternateBouncerInteractor is missing");
-            return false;
-        }
-        Boolean eligible = optBool(alternate, "canShowAlternateBouncerForFingerprint");
-        if (!Boolean.TRUE.equals(eligible)) {
-            log("ALT_SKIPPED: platform biometric eligibility=" + eligible);
-            return false;
-        }
-
-        REDIRECTING.set(Boolean.TRUE);
-        try {
-            boolean invoked = false;
-            try {
-                XposedHelpers.callMethod(alternate, "forceShow");
-                invoked = true;
-                log("ALT forceShow invoked");
-            } catch (Throwable t) {
-                if (!isMissingMethod(t)) {
-                    log("ALT forceShow failed: " + brief(t));
-                    return false;
-                }
-                log("ALT forceShow missing; try legacy show()");
-            }
-            if (!invoked) {
-                Object shown = XposedHelpers.callMethod(alternate, "show");
-                log("ALT legacy show() returned " + shown);
-            }
-
-            if (!Boolean.TRUE.equals(optBool(alternate, "isVisibleState"))) {
-                log("ALT_NOT_VISIBLE: leave credential UI unchanged");
-                return false;
-            }
-            try {
-                XposedHelpers.callMethod(mgr, "updateAlternateBouncerShowing", true);
-            } catch (Throwable t) {
-                // Do not convert a missing UI sync method into a fake unlock.
-                log("ALT state sync unavailable: " + brief(t));
-            }
-            log("ALT_SHOWN: system UDFPS bouncer visible");
-            return true;
-        } catch (Throwable t) {
-            log("ALT_ERROR: " + brief(t));
-            return false;
-        } finally {
-            REDIRECTING.remove();
-        }
-    }
     private static String alternateStatus(Object mgr) {
         if (mgr == null) return "alt=(no manager)";
         Object alternate = field(mgr, "mAlternateBouncerInteractor");
@@ -341,13 +259,6 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         return "dozing=" + isDozing(mgr) +
             " eligible=" + optBool(alternate, "canShowAlternateBouncerForFingerprint") +
             " visible=" + optBool(alternate, "isVisibleState");
-    }
-    private static boolean isMissingMethod(Throwable t) {
-        while (t != null) {
-            if (t instanceof NoSuchMethodError || t instanceof NoSuchMethodException) return true;
-            t = t.getCause();
-        }
-        return false;
     }
     private static String brief(Throwable t) {
         return t.getClass().getSimpleName() + 
@@ -368,9 +279,6 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
     }
     private static Class<?> returnType(XC_MethodHook.MethodHookParam p) {
         return (p.method instanceof Method) ? ((Method) p.method).getReturnType() : null;
-    }
-    private static boolean isRedirecting() {
-        return Boolean.TRUE.equals(REDIRECTING.get());
     }
     private static Object field(Object target, String name) {
         if (target == null) return null;

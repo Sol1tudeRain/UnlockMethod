@@ -1,6 +1,6 @@
-# UnlockMethod — AOD / lockscreen notification fingerprint (v0.4 direct-click test)
+# UnlockMethod — AOD / lockscreen notification fingerprint (v0.4.1 navigation safety hotfix)
 
-LSPosed module for SystemUI: when the user taps a notification on AOD/pulsing display or the regular lock screen, request the ROM's genuine UDFPS alternate bouncer when possible. The notification's real pending action remains owned by SystemUI.
+LSPosed module for SystemUI. v0.4.1 is a safety hotfix that observes AOD/lockscreen notification taps and lets the ROM's native authentication and pending notification launch run without interference.
 
 **Status:** Experimental; not proven compatible with all PixelOS / Android 17 builds. Requires the ROM's existing AlternateBouncerInteractor to be present. No simulated biometric success, no StrongAuth bypass.
 
@@ -64,3 +64,13 @@ On the tested ROM, LSPosed logged `AOD_CLICK_HINT before wake` but neither the n
 This is **not a fingerprint bypass**: it calls the ROM's own alternate fingerprint UI only when `canShowAlternateBouncerForFingerprint()` returns true. If the alternative UI does not become visible, the normal pattern remains.
 
 Use `su -c 'grep -ih "NotifFingerprint" /data/adb/lspd/log/modules_*.log | tail -n 80'` to check `CLICK_ENTRY`, `PRIMARY`, `ALT_*`, and `SCENE_REQUEST` markers. If `CLICK_ENTRY` exists without `PRIMARY` or `SCENE_REQUEST`, the ROM uses a separate credential entrypoint.
+
+## v0.4.1 — IMPORTANT: Fix for notification app not loading
+
+User reports: tapping a notification opens an application page that does not load. The v0.4 module forcibly short-circuited SystemUI methods `showBouncer`, `showPrimaryBouncer`, `PrimaryBouncerInteractor.show`, and `SceneInteractor.changeScene` with `XC_MethodHook.setResult` after attempting to display an alternate fingerprint bouncer. This can prevent the normal post-unlock notification activity dismissal/launch sequence.
+
+**Safety hotfix:** none of those methods are suppressed in v0.4.1, and no alternate bouncer is forced. Notification clicks remain traceable in the LSPosed log with `NotifFingerprint:` and `SAFE_PASS` markers, but the original SystemUI navigation flow remains intact.
+
+**Temporary trade-off:** the custom 'prefer fingerprint after AOD notification tap' behavior is disabled. Your ROM may still show the pattern when tapping an AOD notification. This is intentional until a safe, ROM-specific fingerprint switch can be verified.
+
+Test: compare module off vs. v0.4.1 on; tap a notification, complete the system's requested authentication, verify that the target app fully loads. If either result fails, capture both LSPosed module logs and corresponding Android app/activity launch logs. Do not forcibly restart or manually send the notification PendingIntent.
