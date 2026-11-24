@@ -27,6 +27,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class NotificationFingerprintHook implements IXposedHookLoadPackage {
     private static final long NORMAL_WINDOW_MS = 3500L;
     private static final long AOD_WINDOW_MS = 10000L;
+    private static final long AOD_EXIT_WINDOW_MS = 2500L;
+    private static final AtomicLong LAST_AOD_EXIT = new AtomicLong(0L);
     private static final AtomicLong LAST_NOTIFICATION_TAP = new AtomicLong(0L);
     private static final AtomicLong LAST_AOD_CLICK_HINT = new AtomicLong(0L);
     private static volatile boolean tapWasAod;
@@ -133,6 +135,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) {
                             keyguardViewManager = p.thisObject;
+                            markAodDismissRequest(p.thisObject, p.args, "dismissWithAction");
                             if (activeTap()) {
                                 if (isDozing(p.thisObject)) tapWasAod = true;
                                 log("PATH dismissWithAction before dozing=" + isDozing(p.thisObject) +
@@ -157,6 +160,12 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                     new XC_MethodHook() {
                         @Override protected void beforeHookedMethod(MethodHookParam p) {
                             keyguardViewManager = p.thisObject;
+                            if (!activeTap() &&
+                                field(p.thisObject, "mPendingWakeupAction") != null) {
+                                markAodDismissRequest(p.thisObject,
+                                    new Object[] {field(p.thisObject, "mPendingWakeupAction")},
+                                    "pendingWakeupAction");
+                            }
                             if (activeTap()) {
                                 log("PATH launchPendingWakeupAction dozing=" + isDozing(p.thisObject) +
                                     " AOD=" + tapWasAod + " " + alternateStatus(p.thisObject));
@@ -184,6 +193,15 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
                 XposedBridge.hookAllMethods(manager, "onDozingChanged", new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         keyguardViewManager = p.thisObject;
+                        if (p.args != null && p.args.length > 0 &&
+                            p.args[0] instanceof Boolean) {
+                            boolean next = (Boolean)p.args[0];
+                            if (next) LAST_AOD_EXIT.set(0L);
+                            else if (isDozing(p.thisObject)) {
+                                LAST_AOD_EXIT.set(now());
+                                log("AOD_GENERAL wake boundary");
+                            }
+                        }
                         if (activeTap()) log("PATH onDozingChanged to=" +
                             (p.args != null && p.args.length > 0 ? p.args[0] : "?"));
                     }
@@ -355,7 +373,7 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         } else {
             log("HOOK_MISSING SceneInteractor (legacy ROM)");
         }
-        log("v0.7.1: fix LSPosed eager Handler initializer; preserve AOD UDFPS grace");
+        log("v0.8: central AOD dismiss -> native biometric or credential fallback");
     }
 
     private static void checkDeferredBouncer(DeferredBouncer work, boolean finalCheck) {
@@ -413,12 +431,35 @@ public final class NotificationFingerprintHook implements IXposedHookLoadPackage
         tapWasAod = false;
     }
 
+    // Track authentic AOD-originating dismiss actions, not arbitrary primary bouncers.
+    // SystemUI still owns the original OnDismissAction and launches the app.
+    private static void markAodDismissRequest(Object mgr, Object[] args, String origin) {
+        if (mgr == null || activeTap() || args == null ||
+            args.length == 0 || args[0] == null) return;
+        long boundary = LAST_AOD_EXIT.get();
+        long age = now() - boundary;
+        boolean justWoke = boundary != 0L && age >= 0L &&
+            age <= AOD_EXIT_WINDOW_MS;
+        boolean dozing = isDozing(mgr);
+        if (!dozing && !justWoke) return;
+        Object state = field(mgr, "mKeyguardStateController");
+        if (Boolean.TRUE.equals(optBool(state, "isUnlocked")) ||
+            Boolean.TRUE.equals(optBool(state, "isOccluded"))) return;
+        recordTap(true, "AOD_GENERIC:" + origin);
+        log("AOD_GENERIC dismiss tracked origin=" + origin +
+            " dozing=" + dozing + " age=" + (justWoke ? age : -1));
+    }
+
     private static void recordTap(boolean aod) {
+        recordTap(aod, "notification");
+    }
+
+    private static void recordTap(boolean aod, String origin) {
         long current = now();
         long hint = LAST_AOD_CLICK_HINT.getAndSet(0L);
         tapWasAod = aod || (hint > 0 && current >= hint && current - hint <= 2000L);
         LAST_NOTIFICATION_TAP.set(current);
-        log("CLICK notification on " + (tapWasAod ? "AOD/pulse" : "lockscreen") +
+        log("CLICK " + origin + " on " + (tapWasAod ? "AOD/pulse" : "lockscreen") +
             " manager=" + (keyguardViewManager != null));
     }
 

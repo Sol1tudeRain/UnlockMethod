@@ -1,3 +1,11 @@
+# UnlockMethod v0.8 — AOD universal biometric priority
+
+This version tracks the SystemUI central keyguard dismissal request, not specific date/weather view click handlers. It handles app launch requests during AOD or within 2.5 s of leaving AOD, then reuses v0.7.1's genuine UDFPS gate polling (up to 1.45 s). Original keyguard dismissal and pending app launch are left untouched; the primary credential bouncer is resumed on timeout.
+
+Fingerprints are shown only when SystemUI's canShowAlternateBouncer is true; face unlock remains under Android's own control. No biometric result or StrongAuth permission is forged. Only requests using StatusBarKeyguardViewManager.dismissWithAction are covered; some ROM-specific shortcuts may bypass it. Logs: AOD_GENERAL wake boundary, AOD_GENERIC dismiss tracked, AOD_GRACE.
+
+---
+
 # UnlockMethod — AOD / lockscreen notification fingerprint (v0.7.1 AOD fingerprint grace period)
 
 LSPosed module for SystemUI. v0.5 prioritizes the ROM's real UDFPS alternate bouncer on a lockscreen or AOD notification tap, without intercepting the outer dismissWithAction/showBouncer action-registration methods.
